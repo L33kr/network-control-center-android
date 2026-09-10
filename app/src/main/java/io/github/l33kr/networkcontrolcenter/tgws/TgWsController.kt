@@ -7,6 +7,8 @@ import androidx.core.content.ContextCompat
 
 object TgWsController {
     val status = TgWsProxyService.status
+    val activePort = TgWsProxyService.activePort
+    val lastError = TgWsProxyService.lastError
 
     fun start(context: Context) {
         ContextCompat.startForegroundService(
@@ -23,6 +25,7 @@ object TgWsController {
 
     fun openTelegramProxy(context: Context): Boolean {
         val config = TgWsConfigStore.load(context)
+        val port = activePort.value.takeIf { it in 1..65535 } ?: config.port
         val secret = runCatching { TgWsNative.secretWithPrefix() }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
@@ -32,7 +35,7 @@ object TgWsController {
             .scheme("tg")
             .authority("proxy")
             .appendQueryParameter("server", "127.0.0.1")
-            .appendQueryParameter("port", config.port.toString())
+            .appendQueryParameter("port", port.toString())
             .appendQueryParameter("secret", secret)
             .build()
 
