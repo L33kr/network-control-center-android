@@ -47,10 +47,13 @@ import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiController
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiMode
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategies
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyCatalog
+import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyTester
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -114,6 +117,7 @@ private fun NetworkControlCenterScreen(
     val byeError by ByeDpiController.lastError.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
+    val catalog = remember { ByeDpiStrategyCatalog.load(context) }
 
     var selectedModeName by rememberSaveable {
         mutableStateOf(ByeDpiController.selectedMode(context).name)
@@ -122,10 +126,13 @@ private fun NetworkControlCenterScreen(
         mutableStateOf(ByeDpiConfigStore.load(context).strategyName)
     }
     var showStrategyCatalog by rememberSaveable { mutableStateOf(false) }
+    var testRunning by rememberSaveable { mutableStateOf(false) }
+    var testProgress by rememberSaveable { mutableStateOf<String?>(null) }
 
     val selectedMode = runCatching { ByeDpiMode.valueOf(selectedModeName) }
         .getOrDefault(ByeDpiMode.AUTO)
-    val byeCanConfigure = state.byeDpi == EngineStatus.STOPPED || state.byeDpi == EngineStatus.FAILED
+    val byeStopped = state.byeDpi == EngineStatus.STOPPED || state.byeDpi == EngineStatus.FAILED
+    val byeCanConfigure = byeStopped && !testRunning
 
     if (showStrategyCatalog) {
         ReadyStrategyDialog(
@@ -158,6 +165,7 @@ private fun NetworkControlCenterScreen(
             EngineCard(
                 title = "Интернет / ByeDPI",
                 subtitle = when {
+                    testRunning -> "Идёт локальный тест стратегий YouTube через SOCKS5"
                     state.byeDpi == EngineStatus.RUNNING && byeProfile != null -> buildString {
                         append("$byeProfile")
                         byeNetwork?.let { append(" · $it") }
@@ -167,8 +175,12 @@ private fun NetworkControlCenterScreen(
                 },
                 status = state.byeDpi,
                 checked = state.byeDpi == EngineStatus.RUNNING || state.byeDpi == EngineStatus.STARTING,
-                switchEnabled = state.byeDpi != EngineStatus.STOPPING,
-                detail = if (state.byeDpi == EngineStatus.FAILED) byeError else null,
+                switchEnabled = state.byeDpi != EngineStatus.STOPPING && !testRunning,
+                detail = when {
+                    testRunning || testProgress != null -> testProgress
+                    state.byeDpi == EngineStatus.FAILED -> byeError
+                    else -> null
+                },
                 onEnabledChange = onByeDpiChange,
             )
 
@@ -177,10 +189,12 @@ private fun NetworkControlCenterScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Режим обхода DPI", style = MaterialTheme.typography.titleMedium)
+                    Text("Стратегия обхода DPI", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (byeCanConfigure) {
-                            "Можно выбрать простой профиль или одну из готовых стратегий ByeByeDPI."
+                            "Можно повторить дефолт ByeByeDPI, выбрать готовую строку или запустить автотест YouTube."
+                        } else if (testRunning) {
+                            "Дождись завершения автотеста. VPN во время теста специально недоступен."
                         } else {
                             "Чтобы сменить стратегию, сначала выключи ByeDPI."
                         },
@@ -196,7 +210,52 @@ private fun NetworkControlCenterScreen(
                         enabled = byeCanConfigure,
                         onClick = { showStrategyCatalog = true },
                     ) {
-                        Text("Готовые стратегии ByeDPI")
+                        Text("Готовые стратегии (${catalog.size})")
+                    }
+
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = byeCanConfigure,
+                        onClick = {
+                            testRunning = true
+                            testProgress = "Подготовка автотеста…"
+                            scope.launch {
+                                try {
+                                    val sni = ByeDpiConfigStore.load(context).sni
+                                    val results = ByeDpiStrategyTester.run(
+                                        context = context,
+                                        strategies = catalog,
+                                        sni = sni,
+                                    ) { index, total, current, best ->
+                                        withContext(Dispatchers.Main) {
+                                            testProgress = buildString {
+                                                append("Тест $index/$total · текущая #${current.strategy.index + 1}: ${current.successCount}/${current.totalCount}")
+                                                best?.let {
+                                                    append(" · лучшая #${it.strategy.index + 1}: ${it.successCount}/${it.totalCount}")
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    val best = results.firstOrNull()
+                                    if (best != null && best.successCount > 0) {
+                                        val name = "Автотест · стратегия ${best.strategy.index + 1}"
+                                        ByeDpiConfigStore.setCatalogStrategy(context, name, best.strategy.command)
+                                        selectedModeName = ByeDpiMode.MANUAL.name
+                                        selectedStrategyName = name
+                                        testProgress = "Готово. Выбрана стратегия ${best.strategy.index + 1}: ${best.successCount}/${best.totalCount}. Теперь включи ByeDPI."
+                                    } else {
+                                        testProgress = "Автотест завершён: ни одна стратегия не прошла TLS-проверку YouTube."
+                                    }
+                                } catch (t: Throwable) {
+                                    testProgress = "Ошибка автотеста: ${t.message ?: t.javaClass.simpleName}"
+                                } finally {
+                                    testRunning = false
+                                }
+                            }
+                        },
+                    ) {
+                        Text("Автотест YouTube")
                     }
 
                     ByeDpiStrategies.selectable
@@ -211,6 +270,7 @@ private fun NetworkControlCenterScreen(
                                     ByeDpiController.setMode(context, preset.mode)
                                     selectedModeName = preset.mode.name
                                     selectedStrategyName = null
+                                    testProgress = null
                                 },
                             )
                         }
@@ -245,7 +305,7 @@ private fun NetworkControlCenterScreen(
 
             Spacer(Modifier.height(4.dp))
             Text(
-                "Для YouTube на мобильной сети сначала попробуй несколько верхних готовых стратегий. Следующий этап — автоматический прогон этого каталога и выбор победителя.",
+                "Автотест проверяет www.youtube.com и redirector.googlevideo.com через локальный SOCKS5 ByeDPI без поднятия VPN, затем сохраняет лучший вариант.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
