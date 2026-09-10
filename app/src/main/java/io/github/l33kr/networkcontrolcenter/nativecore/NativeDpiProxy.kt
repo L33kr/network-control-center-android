@@ -46,9 +46,14 @@ class NativeDpiProxy(private val context: Context) {
     @Volatile
     private var serverSocket: ServerSocket? = null
 
+    @Volatile
+    private var forceTcpForBypassDomains: Boolean = true
+
     fun start(bindIp: String, port: Int): Int {
         if (!running.compareAndSet(false, true)) return -2
         NativeRuntime.reset()
+        NativeDnsCache.clear()
+        forceTcpForBypassDomains = NativeSettingsStore.load(context).forceTcpForBypassDomains
 
         return try {
             ServerSocket().use { server ->
@@ -87,6 +92,7 @@ class NativeDpiProxy(private val context: Context) {
         runCatching { serverSocket?.close() }
         clients.toList().forEach { socket -> runCatching { socket.close() } }
         clients.clear()
+        NativeDnsCache.clear()
         workerScope.cancel()
     }
 
@@ -158,7 +164,8 @@ class NativeDpiProxy(private val context: Context) {
                 remote.localPort,
             )
 
-            NativeRuntime.flowOpened(target.displayHost)
+            val correlated = target.address?.let(NativeDnsCache::lookup)
+            NativeRuntime.flowOpened(correlated ?: target.displayHost)
             relayBidirectional(client, clientInput, clientOutput, remote, target)
         } catch (t: Throwable) {
             if (!remote.isConnected) {
@@ -243,7 +250,10 @@ class NativeDpiProxy(private val context: Context) {
                         }
                     }
                     is TlsParseResult.ClientHello -> {
-                        NativeRuntime.tlsSeen(parsed.info.sni ?: target.displayHost)
+                        val displayHost = parsed.info.sni
+                            ?: target.address?.let(NativeDnsCache::lookup)
+                            ?: target.displayHost
+                        NativeRuntime.tlsSeen(displayHost)
                         applyInitialPayload(bytes, parsed.info, null, target, remoteOutput)
                         initial.reset()
                         handled = true
@@ -272,8 +282,24 @@ class NativeDpiProxy(private val context: Context) {
     ) {
         if (bytes.isEmpty()) return
 
-        val host = tls?.sni ?: http?.host ?: target.displayHost
-        val decision = policy.resolve(host, NativeTransport.TCP)
+        val candidates = buildList {
+            tls?.sni?.let(::add)
+            http?.host?.let(::add)
+            target.host?.let(::add)
+            target.address?.let(NativeDnsCache::lookup)?.let(::add)
+        }.map { it.trim().lowercase() }.filter { it.isNotBlank() }.distinct()
+
+        var host = candidates.firstOrNull() ?: target.displayHost
+        var decision = policy.resolve(host, NativeTransport.TCP)
+        for (candidate in candidates) {
+            val candidateDecision = policy.resolve(candidate, NativeTransport.TCP)
+            if (candidateDecision.shouldBypass || candidateDecision.matchedDomain != null) {
+                host = candidate
+                decision = candidateDecision
+                break
+            }
+        }
+
         if (decision.technique == NativeTechnique.PASS) {
             output.write(bytes)
             output.flush()
@@ -358,6 +384,10 @@ class NativeDpiProxy(private val context: Context) {
         markerStart: Int,
         markerEndExclusive: Int,
     ) {
+        if (data.size < 2) {
+            output.write(data)
+            return
+        }
         val middle = (markerStart + markerEndExclusive) / 2
         val positions = listOf(markerStart + 1, middle, markerEndExclusive - 1)
             .map { it.coerceIn(1, data.size - 1) }
@@ -466,8 +496,27 @@ class NativeDpiProxy(private val context: Context) {
                 if (clientEndpoint == null) clientEndpoint = source
                 val datagram = runCatching { parseUdpDatagram(bytes) }.getOrNull() ?: continue
                 if (datagram.fragment != 0) continue
-                val destination = datagram.target.socketAddress()
-                NativeRuntime.udpPacket(datagram.target.displayHost)
+
+                val destination = runCatching { datagram.target.socketAddress() }.getOrNull() ?: continue
+                val correlatedHost = datagram.target.host?.lowercase()
+                    ?: NativeDnsCache.lookup(destination.address)
+                val displayHost = correlatedHost ?: datagram.target.displayHost
+                val decision = policy.resolve(correlatedHost, NativeTransport.UDP)
+                NativeRuntime.udpPacket(displayHost)
+
+                // QUIC commonly uses UDP/443. For configured BYPASS domains we can
+                // selectively suppress it so clients retry over TCP/TLS, where our
+                // protocol-aware transformations are available. Other UDP/443 flows
+                // are untouched.
+                if (
+                    forceTcpForBypassDomains &&
+                    destination.port == 443 &&
+                    decision.shouldBypass
+                ) {
+                    NativeRuntime.quicFallback(displayHost)
+                    continue
+                }
+
                 relay.send(
                     DatagramPacket(
                         datagram.payload,
@@ -479,6 +528,9 @@ class NativeDpiProxy(private val context: Context) {
             } else {
                 val client = clientEndpoint ?: continue
                 val remote = source as? InetSocketAddress ?: continue
+                if (remote.port == DNS_PORT) {
+                    NativeDnsCache.observeResponse(bytes)
+                }
                 val wrapped = encodeUdpResponse(remote.address, remote.port, bytes)
                 relay.send(DatagramPacket(wrapped, wrapped.size, client))
             }
@@ -679,6 +731,7 @@ class NativeDpiProxy(private val context: Context) {
         private const val COPY_BUFFER_SIZE = 32 * 1024
         private const val SPLIT_DELAY_MS = 5L
         private const val HYBRID_DELAY_MS = 8L
+        private const val DNS_PORT = 53
 
         private val HTTP_METHODS = listOf(
             "GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT ",
