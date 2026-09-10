@@ -14,9 +14,11 @@ import io.github.l33kr.networkcontrolcenter.byedpi.profile.GenericProfileLabelsM
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileEngineBridge
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileStore
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
+import io.github.l33kr.networkcontrolcenter.nativecore.EngineMode
+import io.github.l33kr.networkcontrolcenter.nativecore.EngineModeStore
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
+import io.github.l33kr.networkcontrolcenter.ui.nativealpha.NativeControlApp
 import io.github.l33kr.networkcontrolcenter.ui.theme.DpiControlTheme
-import io.github.l33kr.networkcontrolcenter.ui.v2.DpiControlApp
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -26,6 +28,8 @@ class MainActivity : ComponentActivity() {
         ProfileStore.ensureInitialized(applicationContext)
         GenericProfileLabelsMigration.apply(applicationContext)
         ProfileEngineBridge.applyActiveSet(applicationContext)
+        // This experimental build deliberately uses our own stream engine.
+        EngineModeStore.save(applicationContext, EngineMode.NATIVE_ALPHA)
 
         setContent {
             DpiControlTheme {
@@ -35,24 +39,27 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.StartActivityForResult(),
                 ) { result ->
                     if (result.resultCode == Activity.RESULT_OK) {
-                        ProfileEngineBridge.applyActiveSet(applicationContext)
                         scope.launch { controller.startByeDpi() }
                     }
                 }
 
-                DpiControlApp(
+                NativeControlApp(
                     controller = controller,
-                    onByeDpiChange = { enabled ->
+                    onVpnChange = { enabled ->
                         if (!enabled) {
                             scope.launch { controller.stopByeDpi() }
                         } else {
-                            ProfileEngineBridge.applyActiveSet(applicationContext)
                             val permissionIntent = VpnService.prepare(this@MainActivity)
                             if (permissionIntent == null) {
                                 scope.launch { controller.startByeDpi() }
                             } else {
                                 vpnPermissionLauncher.launch(permissionIntent)
                             }
+                        }
+                    },
+                    onTelegramChange = { enabled ->
+                        scope.launch {
+                            if (enabled) controller.startTgWs() else controller.stopTgWs()
                         }
                     },
                     onApplyTelegramProxy = {
