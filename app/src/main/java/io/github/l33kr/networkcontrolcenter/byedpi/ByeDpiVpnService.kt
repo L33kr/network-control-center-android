@@ -4,8 +4,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -28,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,6 +54,18 @@ class ByeDpiVpnService : VpnService() {
 
         private val _status = MutableStateFlow(EngineStatus.STOPPED)
         val status: StateFlow<EngineStatus> = _status.asStateFlow()
+
+        private val _activeProfile = MutableStateFlow<String?>(null)
+        val activeProfile: StateFlow<String?> = _activeProfile.asStateFlow()
+
+        private val _networkLabel = MutableStateFlow<String?>(null)
+        val networkLabel: StateFlow<String?> = _networkLabel.asStateFlow()
+
+        private val _ipv6Active = MutableStateFlow(false)
+        val ipv6Active: StateFlow<Boolean> = _ipv6Active.asStateFlow()
+
+        private val _lastError = MutableStateFlow<String?>(null)
+        val lastError: StateFlow<String?> = _lastError.asStateFlow()
     }
 
     override fun onCreate() {
@@ -69,16 +85,31 @@ class ByeDpiVpnService : VpnService() {
         if (_status.value == EngineStatus.STARTING || _status.value == EngineStatus.RUNNING) return
 
         stopping.set(false)
+        _lastError.value = null
         _status.value = EngineStatus.STARTING
         startForegroundCompat(createNotification("Запуск ByeDPI…"))
 
         scope.launch {
             try {
                 val config = ByeDpiConfigStore.load(this@ByeDpiVpnService)
-                startProxy(config)
+                val network = detectNetwork()
+                val strategy = ByeDpiStrategies.resolve(config, network.isCellular)
+                val useIpv6 = shouldRouteIpv6(config.ipv6Mode, network)
+
+                _activeProfile.value = strategy.title
+                _networkLabel.value = network.label
+                _ipv6Active.value = useIpv6
+
+                Log.i(
+                    TAG,
+                    "Starting profile=${strategy.title}, network=${network.label}, ipv6=$useIpv6, command=${strategy.command}",
+                )
+                updateNotification("${strategy.title} · ${network.label} · запуск…")
+
+                startProxy(config, strategy.command)
 
                 if (!waitForProxy(config.bindIp, config.port)) {
-                    error("ByeDPI SOCKS5 did not become ready")
+                    error("ByeDPI SOCKS5 не запустился. Проверьте стратегию")
                 }
 
                 val configFile = createHevConfig(config)
@@ -97,7 +128,7 @@ class ByeDpiVpnService : VpnService() {
                     .addAddress("10.10.10.10", 32)
                     .addRoute("0.0.0.0", 0)
 
-                if (config.ipv6Mode == Ipv6Mode.ON) {
+                if (useIpv6) {
                     builder.addAddress("fd00::1", 128)
                         .addRoute("::", 0)
                 }
@@ -105,38 +136,44 @@ class ByeDpiVpnService : VpnService() {
                 if (config.dns.isNotBlank()) builder.addDnsServer(config.dns)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
-                // Critical loop prevention: ByeDPI and TG WS outbound sockets belong
-                // to this application and must use the physical network directly.
+                // The native ByeDPI proxy and TG WS live in this package. Keeping the
+                // package outside the TUN prevents VPN -> proxy -> VPN routing loops.
                 builder.addDisallowedApplication(packageName)
 
-                val descriptor = builder.establish() ?: error("VpnService establish() returned null")
+                val descriptor = builder.establish()
+                    ?: error("Android не создал VPN-интерфейс")
                 tun = descriptor
 
                 if (!TProxyService.TProxyStartService(configFile.absolutePath, descriptor.fd)) {
-                    error("hev-socks5-tunnel failed to start")
+                    error("hev-socks5-tunnel не запустился")
                 }
 
                 _status.value = EngineStatus.RUNNING
-                updateNotification("ByeDPI работает · ${config.bindIp}:${config.port}")
+                val ipv6Text = if (useIpv6) "IPv4+IPv6" else "IPv4"
+                updateNotification("${strategy.title} · ${network.label} · $ipv6Text")
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to start ByeDPI VPN", t)
+                val message = t.message ?: t.javaClass.simpleName
+                _lastError.value = message
                 _status.value = EngineStatus.FAILED
-                updateNotification("Ошибка ByeDPI: ${t.message ?: t.javaClass.simpleName}")
+                updateNotification("Ошибка ByeDPI: $message")
                 cleanupAfterFailure()
             }
         }
     }
 
-    private fun startProxy(config: ByeDpiConfig) {
+    private fun startProxy(config: ByeDpiConfig, command: String) {
         check(proxyJob == null) { "ByeDPI proxy job already exists" }
+        val argsConfig = config.copy(command = command)
         proxyJob = scope.launch(Dispatchers.IO) {
-            val code = runCatching { proxy.start(config) }
+            val code = runCatching { proxy.start(argsConfig) }
                 .onFailure { Log.e(TAG, "ByeDPI native loop failed", it) }
                 .getOrDefault(-1)
 
             withContext(Dispatchers.Main) {
                 if (!stopping.get() && _status.value != EngineStatus.FAILED) {
                     Log.e(TAG, "ByeDPI exited unexpectedly with code $code")
+                    _lastError.value = "Ядро ByeDPI завершилось: $code"
                     _status.value = EngineStatus.FAILED
                     updateNotification("ByeDPI завершился: $code")
                     scope.launch { cleanupAfterFailure() }
@@ -146,7 +183,7 @@ class ByeDpiVpnService : VpnService() {
     }
 
     private suspend fun waitForProxy(host: String, port: Int): Boolean = withContext(Dispatchers.IO) {
-        repeat(30) {
+        repeat(40) {
             val ready = runCatching {
                 Socket().use { socket ->
                     socket.connect(InetSocketAddress(host, port), 150)
@@ -177,44 +214,91 @@ class ByeDpiVpnService : VpnService() {
         }
     }
 
+    private fun detectNetwork(): NetworkSnapshot {
+        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = manager.activeNetwork
+        val capabilities = network?.let(manager::getNetworkCapabilities)
+        val linkProperties = network?.let(manager::getLinkProperties)
+
+        val cellular = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+        val wifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        val ethernet = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+        val hasIpv6 = linkProperties?.linkAddresses?.any { link ->
+            val address = link.address
+            address is Inet6Address && !address.isLinkLocalAddress && !address.isLoopbackAddress
+        } == true
+
+        val label = when {
+            cellular -> "Мобильная сеть"
+            wifi -> "Wi‑Fi"
+            ethernet -> "Ethernet"
+            else -> "Сеть"
+        }
+
+        return NetworkSnapshot(
+            isCellular = cellular,
+            hasIpv6 = hasIpv6,
+            label = label,
+        )
+    }
+
+    private fun shouldRouteIpv6(mode: Ipv6Mode, network: NetworkSnapshot): Boolean = when (mode) {
+        Ipv6Mode.ON -> true
+        Ipv6Mode.OFF -> false
+        // Conservative default for mobile DPI: avoid an IPv6 path bypassing the
+        // IPv4 desync path. Wi-Fi keeps IPv6 when the active link actually has it.
+        Ipv6Mode.AUTO -> network.hasIpv6 && !network.isCellular
+    }
+
     private suspend fun stopEngine() {
         if (_status.value == EngineStatus.STOPPED || !stopping.compareAndSet(false, true)) return
         _status.value = EngineStatus.STOPPING
         updateNotification("Остановка ByeDPI…")
 
+        stopHevAndTun()
+        stopProxyOnly()
+        clearRuntimeFiles()
+
+        _status.value = EngineStatus.STOPPED
+        _activeProfile.value = null
+        _networkLabel.value = null
+        _ipv6Active.value = false
+        _lastError.value = null
+        stopping.set(false)
+        stopForegroundCompat()
+        stopSelf()
+    }
+
+    private suspend fun cleanupAfterFailure() {
+        stopHevAndTun()
+        stopProxyOnly()
+        clearRuntimeFiles()
+    }
+
+    private fun stopHevAndTun() {
         runCatching {
             if (TProxyService.TProxyIsRunning()) TProxyService.TProxyStopService()
         }.onFailure { Log.w(TAG, "Failed to stop hev", it) }
 
         runCatching { tun?.close() }
         tun = null
-
-        runCatching { proxy.stop() }
-        val job = proxyJob
-        if (job != null) {
-            val stopped = withTimeoutOrNull(3000) {
-                job.join()
-                true
-            } ?: false
-            if (!stopped) runCatching { proxy.forceClose() }
-        }
-        proxyJob = null
-
-        hevConfig?.let { runCatching { it.delete() } }
-        hevConfig = null
-
-        _status.value = EngineStatus.STOPPED
-        stopping.set(false)
-        stopForegroundCompat()
-        stopSelf()
     }
 
-    private fun cleanupAfterFailure() {
-        runCatching { if (TProxyService.TProxyIsRunning()) TProxyService.TProxyStopService() }
-        runCatching { tun?.close() }
-        tun = null
+    private suspend fun stopProxyOnly() {
+        val job = proxyJob ?: return
         runCatching { proxy.stop() }
+        val stopped = withTimeoutOrNull(3000) {
+            job.join()
+            true
+        } ?: false
+        if (!stopped) {
+            runCatching { proxy.forceClose() }
+            withTimeoutOrNull(1000) { job.join() }
+        }
         proxyJob = null
+    }
+
+    private fun clearRuntimeFiles() {
         hevConfig?.let { runCatching { it.delete() } }
         hevConfig = null
     }
@@ -226,7 +310,11 @@ class ByeDpiVpnService : VpnService() {
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -294,4 +382,10 @@ class ByeDpiVpnService : VpnService() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
+
+    private data class NetworkSnapshot(
+        val isCellular: Boolean,
+        val hasIpv6: Boolean,
+        val label: String,
+    )
 }
