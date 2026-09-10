@@ -25,8 +25,11 @@ data class NativePolicyDecision(
 )
 
 /**
- * Resolves the existing v2 profile/list model into actions owned by our engine.
- * The first enabled matching profile wins; an empty-domain profile is a catch-all.
+ * Resolves the v2 profile/list model into actions owned by Native Engine.
+ *
+ * ByeDPI command strings are deliberately ignored here. Native Engine has its
+ * own strategy store so legacy data can remain untouched for rollback/testing.
+ * The first enabled matching profile wins; an empty-domain profile is catch-all.
  */
 class NativePolicyResolver(private val context: Context) {
     fun resolve(host: String?, transport: NativeTransport): NativePolicyDecision {
@@ -44,29 +47,36 @@ class NativePolicyResolver(private val context: Context) {
                     technique = NativeTechnique.PASS,
                     profileName = profile.name,
                     matchedDomain = match,
-                    strategyTitle = "PASS",
+                    strategyTitle = NativeStrategies.PASS.title,
                 )
             }
 
-            val nativePreset = NativeStrategies.fromCommand(profile.strategyCommand)
-            val technique = when (transport) {
-                // UDP/QUIC is intentionally transparent in alpha 1. It remains
-                // functional while the dedicated QUIC manipulator is developed.
-                NativeTransport.UDP -> NativeTechnique.PASS
-                NativeTransport.TCP -> nativePreset?.technique ?: NativeTechnique.HYBRID
+            // Alpha 1 keeps UDP transparent until the dedicated QUIC engine is
+            // ready. Breaking UDP globally would be worse than not modifying it.
+            if (transport == NativeTransport.UDP) {
+                return NativePolicyDecision(
+                    technique = NativeTechnique.PASS,
+                    profileName = profile.name,
+                    matchedDomain = match,
+                    strategyTitle = "UDP passthrough",
+                )
             }
+
+            val strategy = NativePolicyStore.strategyForProfile(context, profile.id)
+                ?: NativePolicyStore.defaultStrategy(context)
+
             return NativePolicyDecision(
-                technique = technique,
+                technique = strategy.technique,
                 profileName = profile.name,
                 matchedDomain = match,
-                strategyTitle = nativePreset?.title ?: "Auto / Hybrid",
+                strategyTitle = strategy.title,
             )
         }
 
         return NativePolicyDecision(
             technique = NativeTechnique.PASS,
             profileName = "Остальной трафик",
-            strategyTitle = "PASS",
+            strategyTitle = NativeStrategies.PASS.title,
         )
     }
 
