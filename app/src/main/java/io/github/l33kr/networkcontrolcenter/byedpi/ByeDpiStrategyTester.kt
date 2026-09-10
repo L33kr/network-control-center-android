@@ -13,13 +13,12 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
+import java.net.URL
 import kotlin.system.measureTimeMillis
 
 data class StrategyTestTarget(
@@ -34,6 +33,9 @@ data class DomainProbeResult(
     val target: StrategyTestTarget,
     val success: Boolean,
     val latencyMs: Long?,
+    val httpCode: Int? = null,
+    val bytesRead: Long = 0,
+    val error: String? = null,
 )
 
 data class StrategyTestResult(
@@ -66,22 +68,27 @@ data class StrategySearchReport(
     val best: StrategyTestResult? get() = verified.firstOrNull()
 }
 
+private data class HttpProbeOutcome(
+    val success: Boolean,
+    val httpCode: Int? = null,
+    val bytesRead: Long = 0,
+    val error: String? = null,
+)
+
 object ByeDpiStrategyTester {
-    private const val MAX_PARALLEL_HOSTS = 4
-    private const val MAX_SAMPLE_HOSTS = 12
-    private const val GENERATED_SAMPLE_HOSTS = 4
-    private const val NORMAL_TIMEOUT_MS = 2500
-    private const val GENERATED_PRELIMINARY_TIMEOUT_MS = 1500
+    private const val MAX_PARALLEL_HOSTS = 3
+    private const val MAX_SAMPLE_HOSTS = 10
+    private const val LAB_SAMPLE_HOSTS = 4
+    private const val NORMAL_TIMEOUT_MS = 4500
+    private const val LAB_PRELIMINARY_TIMEOUT_MS = 2500
     private const val FINALISTS = 3
+    private const val MAX_BODY_BYTES = 64L * 1024L
+    private const val MIN_LARGE_BODY_BYTES = 8L * 1024L
 
     /**
-     * Build the coverage list from the user's real configuration, not from a
-     * hard-coded YouTube list. Every named list participates, including custom
-     * lists, the PASS/ignore list and the legacy manual field from 0.4.x.
-     *
-     * PASS-only hosts are kept in [StrategySearchReport.targets] so the UI can
-     * account for every configured domain, but they are not scored against a
-     * BYPASS strategy because intentionally passing them is not a strategy failure.
+     * Build coverage from the real configuration. Every named list participates,
+     * including user-created lists, PASS/ignore lists and the legacy 0.4 field.
+     * PASS-only hosts stay visible in the report but do not reduce BYPASS score.
      */
     fun collectTargets(
         context: Context,
@@ -109,13 +116,16 @@ object ByeDpiStrategyTester {
         lists.forEach { list ->
             list.domains.forEach { host ->
                 listNamesByDomain.getOrPut(host) { linkedSetOf() } += list.name
-                if (list.id == ProfileStore.LIST_USER || list.id == ProfileStore.LIST_IGNORE || list.id.startsWith("list-")) {
+                if (
+                    list.id == ProfileStore.LIST_USER ||
+                    list.id == ProfileStore.LIST_IGNORE ||
+                    list.id.startsWith("list-")
+                ) {
                     manualDomains += host
                 }
             }
         }
 
-        // Preserve manually entered domains from the pre-v2 screen as well.
         ByeDpiConfigStore.load(context).normalizedDomains().forEach { host ->
             listNamesByDomain.getOrPut(host) { linkedSetOf() } += "Ручные домены (0.4)"
             manualDomains += host
@@ -140,13 +150,12 @@ object ByeDpiStrategyTester {
     }
 
     /**
-     * Low-load strategy finder:
-     *  1) candidates are tested on a representative sample;
-     *  2) only the three best candidates are verified against every BYPASS host.
+     * Low-load search similar to ByeByeDPI's proxy tester, but adapted for the
+     * phone: first rank candidates on a small sample, then verify only three
+     * finalists against every configured BYPASS host.
      *
-     * When generated candidates participate, the first stage automatically uses
-     * just four representative hosts and a shorter timeout. This keeps Strategy
-     * Lab practical on a phone even when the user has dozens of custom domains.
+     * Unlike the old tester, success now requires an actual HTTPS request through
+     * the local SOCKS proxy. Merely completing TLS is no longer enough.
      */
     suspend fun findBestAdaptive(
         context: Context,
@@ -161,16 +170,17 @@ object ByeDpiStrategyTester {
             return@withContext StrategySearchReport(targets, emptyList(), emptyList())
         }
 
-        val generatedSearch = candidates.any { it.category == "Generator" }
-        val sampleLimit = if (generatedSearch) GENERATED_SAMPLE_HOSTS else MAX_SAMPLE_HOSTS
-        val preliminaryTimeout = if (generatedSearch) GENERATED_PRELIMINARY_TIMEOUT_MS else NORMAL_TIMEOUT_MS
+        val nativeLabSearch = candidates.any { it.category == "Android" || it.category == "Generator" }
+        val sampleLimit = if (nativeLabSearch) LAB_SAMPLE_HOSTS else MAX_SAMPLE_HOSTS
+        val preliminaryTimeout = if (nativeLabSearch) LAB_PRELIMINARY_TIMEOUT_MS else NORMAL_TIMEOUT_MS
         val sample = representativeSample(eligible, sampleLimit)
         val preliminary = mutableListOf<StrategyTestResult>()
 
         candidates.forEachIndexed { index, strategy ->
+            val phase = if (nativeLabSearch) "ByeDPI · быстрый отбор" else "Быстрый отбор"
             onProgress(
                 StrategySearchProgress(
-                    phase = if (generatedSearch) "Генерация · быстрый отбор" else "Быстрый отбор",
+                    phase = phase,
                     strategyIndex = index + 1,
                     strategyTotal = candidates.size,
                     strategyName = strategy.name,
@@ -189,7 +199,7 @@ object ByeDpiStrategyTester {
             preliminary += result
             onProgress(
                 StrategySearchProgress(
-                    phase = if (generatedSearch) "Генерация · быстрый отбор" else "Быстрый отбор",
+                    phase = phase,
                     strategyIndex = index + 1,
                     strategyTotal = candidates.size,
                     strategyName = strategy.name,
@@ -205,7 +215,7 @@ object ByeDpiStrategyTester {
         finalists.forEachIndexed { index, strategy ->
             onProgress(
                 StrategySearchProgress(
-                    phase = "Проверка всех доменов",
+                    phase = "HTTPS · все домены",
                     strategyIndex = index + 1,
                     strategyTotal = finalists.size,
                     strategyName = strategy.name,
@@ -224,7 +234,7 @@ object ByeDpiStrategyTester {
             verified += result
             onProgress(
                 StrategySearchProgress(
-                    phase = "Проверка всех доменов",
+                    phase = "HTTPS · все домены",
                     strategyIndex = index + 1,
                     strategyTotal = finalists.size,
                     strategyName = strategy.name,
@@ -265,14 +275,10 @@ object ByeDpiStrategyTester {
         if (targets.size <= maxHosts) return targets
 
         val selected = linkedMapOf<String, StrategyTestTarget>()
-
-        // Manual entries get priority so the user never adds a host that the
-        // generator silently ignores during its first stage.
         targets.filter { it.manual }.take((maxHosts / 2).coerceAtLeast(1)).forEach {
             selected[it.host] = it
         }
 
-        // Then represent as many named services/lists as the small sample allows.
         targets
             .flatMap { target -> target.listNames.map { it to target } }
             .groupBy({ it.first }, { it.second })
@@ -299,6 +305,9 @@ object ByeDpiStrategyTester {
     ): StrategyTestResult = coroutineScope {
         if (targets.isEmpty()) return@coroutineScope StrategyTestResult(strategy, emptyList(), preliminary)
 
+        // Strategy tests deliberately bypass ProfileCompiler. This is the same
+        // raw-command model used by ByeByeDPI's command-mode tester and lets us
+        // distinguish a bad strategy from a bad profile compilation.
         val baseConfig = ByeDpiConfigStore.load(context)
         val port = findFreePort()
         val proxy = ByeDpiProxy()
@@ -322,20 +331,27 @@ object ByeDpiStrategyTester {
             val semaphore = Semaphore(MAX_PARALLEL_HOSTS)
             targets.map { target ->
                 async(Dispatchers.IO) {
-                    semaphore.withPermit { probeTls(target, port, timeoutMs) }
+                    semaphore.withPermit { probeHttps(target, port, timeoutMs) }
                 }
             }.awaitAll()
         } else {
-            targets.map { DomainProbeResult(it, success = false, latencyMs = null) }
+            targets.map {
+                DomainProbeResult(
+                    target = it,
+                    success = false,
+                    latencyMs = null,
+                    error = "ByeDPI SOCKS не запустился",
+                )
+            }
         }
 
         runCatching { proxy.stop() }
-        val finished = withTimeoutOrNull(1500) {
+        val finished = withTimeoutOrNull(1800) {
             proxyJob.await()
             true
         } ?: false
         if (!finished) runCatching { proxy.forceClose() }
-        delay(80)
+        delay(100)
 
         StrategyTestResult(strategy, probes, preliminary)
     }
@@ -350,7 +366,7 @@ object ByeDpiStrategyTester {
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
 
     private suspend fun waitForPort(port: Int): Boolean {
-        repeat(25) {
+        repeat(30) {
             val ready = runCatching {
                 Socket().use { socket ->
                     socket.connect(InetSocketAddress("127.0.0.1", port), 100)
@@ -363,32 +379,86 @@ object ByeDpiStrategyTester {
         return false
     }
 
-    private fun probeTls(target: StrategyTestTarget, port: Int, timeoutMs: Int): DomainProbeResult {
-        var success = false
+    private fun probeHttps(target: StrategyTestTarget, port: Int, timeoutMs: Int): DomainProbeResult {
+        var outcome = HttpProbeOutcome(success = false, error = "Нет ответа")
         val elapsed = measureTimeMillis {
-            success = testTlsThroughSocks(target.host, port, timeoutMs)
+            outcome = testHttpsThroughSocks(target.host, port, timeoutMs)
         }
         return DomainProbeResult(
             target = target,
-            success = success,
-            latencyMs = elapsed.takeIf { success },
+            success = outcome.success,
+            latencyMs = elapsed.takeIf { outcome.success },
+            httpCode = outcome.httpCode,
+            bytesRead = outcome.bytesRead,
+            error = outcome.error,
         )
     }
 
-    private fun testTlsThroughSocks(host: String, port: Int, timeoutMs: Int): Boolean = runCatching {
-        val socks = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
-        val raw = Socket(socks)
-        raw.soTimeout = timeoutMs
-        raw.connect(InetSocketAddress.createUnresolved(host, 443), timeoutMs)
+    /**
+     * Mirrors ByeByeDPI's SiteCheckUtils approach: open a real HTTPS URL through
+     * SOCKS, obtain the HTTP response and consume enough of the body to detect a
+     * connection that survives ClientHello but is reset immediately afterwards.
+     * Large pages are capped to keep the test light on mobile data.
+     */
+    private fun testHttpsThroughSocks(host: String, port: Int, timeoutMs: Int): HttpProbeOutcome {
+        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
+        var connection: HttpURLConnection? = null
 
-        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-        val ssl = factory.createSocket(raw, host, 443, true) as SSLSocket
-        ssl.soTimeout = timeoutMs
-        ssl.sslParameters = ssl.sslParameters.apply {
-            serverNames = listOf(SNIHostName(host))
+        return try {
+            connection = URL("https://$host/").openConnection(proxy) as HttpURLConnection
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = timeoutMs
+            connection.instanceFollowRedirects = true
+            connection.useCaches = false
+            connection.setRequestProperty("Connection", "close")
+            connection.setRequestProperty("User-Agent", "DPI-Control/0.5 ByeDPI-check")
+
+            val code = connection.responseCode
+            val declaredLength = connection.contentLengthLong
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            var actualLength = 0L
+            var readFailed = false
+
+            if (stream != null) {
+                try {
+                    stream.use { input ->
+                        val buffer = ByteArray(8192)
+                        val readLimit = when {
+                            declaredLength in 1..MAX_BODY_BYTES -> declaredLength
+                            else -> MAX_BODY_BYTES
+                        }
+                        while (actualLength < readLimit) {
+                            val remaining = readLimit - actualLength
+                            val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                            if (read == -1) break
+                            actualLength += read
+                        }
+                    }
+                } catch (_: Exception) {
+                    readFailed = true
+                }
+            }
+
+            val bodyLooksComplete = when {
+                declaredLength <= 0L -> !readFailed || code in 100..599
+                declaredLength <= MAX_BODY_BYTES -> !readFailed && actualLength >= declaredLength
+                else -> !readFailed && actualLength >= MIN_LARGE_BODY_BYTES
+            }
+            val success = code in 100..599 && bodyLooksComplete
+
+            HttpProbeOutcome(
+                success = success,
+                httpCode = code,
+                bytesRead = actualLength,
+                error = if (success) null else "HTTP $code, получено $actualLength/${declaredLength.coerceAtLeast(0)} байт",
+            )
+        } catch (e: Exception) {
+            HttpProbeOutcome(
+                success = false,
+                error = e.javaClass.simpleName + (e.message?.let { ": $it" } ?: ""),
+            )
+        } finally {
+            connection?.disconnect()
         }
-        ssl.startHandshake()
-        ssl.close()
-        true
-    }.getOrDefault(false)
+    }
 }
