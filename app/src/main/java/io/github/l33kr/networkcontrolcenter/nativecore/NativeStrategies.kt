@@ -13,8 +13,8 @@ data class NativeStrategyPreset(
 object NativeStrategies {
     val AUTO = NativeStrategyPreset(
         id = "auto",
-        title = "Auto",
-        description = "Автоматический режим. Пока использует безопасный Hybrid и сохраняет формат для дальнейшего обучения по сети.",
+        title = "Adaptive",
+        description = "Собственный автоматический режим Native Engine. Для TLS использует протокольно-корректный record split с коротким разнесением отправки; для HTTP — semantic multi-split.",
         technique = NativeTechnique.HYBRID,
         recommended = true,
     )
@@ -22,29 +22,41 @@ object NativeStrategies {
     val TLS_RECORD = NativeStrategyPreset(
         id = "tls-record",
         title = "TLS Record Split",
-        description = "Разбивает ClientHello на два корректных TLS record в середине имени хоста.",
+        description = "Разбивает ClientHello на два корректных TLS record около середины SNI, не повреждая handshake.",
         technique = NativeTechnique.TLS_RECORD_SPLIT,
+        recommended = true,
     )
 
     val MULTI_SPLIT = NativeStrategyPreset(
         id = "multi-split",
-        title = "SNI Multi Split",
-        description = "Передаёт ClientHello несколькими TCP-записями вокруг начала, середины и конца SNI.",
+        title = "Semantic Multi Split",
+        description = "Отправляет ClientHello несколькими TCP write вокруг начала, середины и конца SNI/HTTP Host.",
         technique = NativeTechnique.MULTI_SPLIT,
+        recommended = true,
     )
 
     val HYBRID = NativeStrategyPreset(
         id = "hybrid",
-        title = "Hybrid",
-        description = "TLS Record Split плюс раздельная отправка частей с короткой задержкой.",
+        title = "TLS Hybrid",
+        description = "Сочетает корректный TLS record split с короткой задержкой между record. Это полностью наша реализация без ByeDPI.",
         technique = NativeTechnique.HYBRID,
         recommended = true,
     )
 
-    val all: List<NativeStrategyPreset> = listOf(AUTO, HYBRID, TLS_RECORD, MULTI_SPLIT)
+    val PASS = NativeStrategyPreset(
+        id = "pass",
+        title = "Без преобразований",
+        description = "Прозрачная передача трафика. Полезно для исключений и диагностики.",
+        technique = NativeTechnique.PASS,
+    )
+
+    val all: List<NativeStrategyPreset> = listOf(AUTO, HYBRID, TLS_RECORD, MULTI_SPLIT, PASS)
+
+    fun byId(id: String?): NativeStrategyPreset? = all.firstOrNull { it.id == id }
 
     fun fromCommand(command: String?): NativeStrategyPreset? {
-        val id = command?.trim()?.removePrefix("native://") ?: return null
-        return all.firstOrNull { it.id == id }
+        val raw = command?.trim() ?: return null
+        if (!raw.startsWith("native://")) return null
+        return byId(raw.removePrefix("native://"))
     }
 }
