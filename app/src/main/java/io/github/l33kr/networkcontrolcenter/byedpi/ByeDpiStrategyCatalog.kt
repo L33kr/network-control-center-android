@@ -144,6 +144,7 @@ object ByeDpiStrategyCatalog {
     )
 
     fun load(context: Context): List<CatalogStrategy> {
+        val generated = ByeDpiStrategyGenerator.quick()
         val legacy = context.assets.open("byedpi_strategies.list")
             .bufferedReader()
             .useLines { lines ->
@@ -164,11 +165,23 @@ object ByeDpiStrategyCatalog {
                     }
                     .toList()
             }
-        return curated + legacy
+        return (curated + generated + legacy).distinctBy { it.command }
     }
 
+    /**
+     * Automatic search now includes generated variants. The tester notices the
+     * Generator category and switches its preliminary stage to a much smaller
+     * representative sample/timeout, so generation does not multiply battery and
+     * traffic usage by every configured domain.
+     */
     fun quickCandidates(context: Context): List<CatalogStrategy> = load(context)
         .filter { it.recommended && it.protocol == "TCP/TLS" }
+        .distinctBy { it.command }
+
+    fun deepCandidates(context: Context): List<CatalogStrategy> = (
+        load(context).filter { it.protocol == "TCP/TLS" && it.category != "Legacy" } +
+            ByeDpiStrategyGenerator.deep()
+        ).distinctBy { it.command }
 
     fun find(context: Context, id: String): CatalogStrategy? = load(context).firstOrNull { it.id == id }
 }
