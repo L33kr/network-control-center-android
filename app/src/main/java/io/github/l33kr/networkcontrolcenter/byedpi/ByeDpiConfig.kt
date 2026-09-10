@@ -20,8 +20,10 @@ data class ByeDpiConfig(
     val bindIp: String = "127.0.0.1",
     val port: Int = 1080,
     val mode: ByeDpiMode = ByeDpiMode.AUTO,
-    /** Used only when [mode] is MANUAL. Kept compatible with the old `command` preference. */
+    /** Used for manual and imported catalog strategies. */
     val command: String = ByeDpiStrategies.BALANCED.command,
+    val strategyName: String? = null,
+    val sni: String = "google.com",
     val dns: String = "1.1.1.1",
     val ipv6Mode: Ipv6Mode = Ipv6Mode.AUTO,
 ) {
@@ -31,7 +33,7 @@ data class ByeDpiConfig(
         add(bindIp)
         add("--port")
         add(port.toString())
-        addAll(shellSplit(commandOverride ?: command))
+        addAll(shellSplit((commandOverride ?: command).replace("{sni}", sni)))
     }.toTypedArray()
 }
 
@@ -50,6 +52,8 @@ object ByeDpiConfigStore {
             }.getOrDefault(ByeDpiMode.AUTO),
             command = prefs.getString("command", ByeDpiStrategies.BALANCED.command)
                 ?: ByeDpiStrategies.BALANCED.command,
+            strategyName = prefs.getString("strategy_name", null),
+            sni = prefs.getString("sni", "google.com")?.trim().orEmpty().ifBlank { "google.com" },
             dns = prefs.getString("dns", "1.1.1.1") ?: "1.1.1.1",
             ipv6Mode = runCatching {
                 Ipv6Mode.valueOf(
@@ -66,6 +70,8 @@ object ByeDpiConfigStore {
             .putInt("port", config.port)
             .putString("mode", config.mode.name)
             .putString("command", config.command)
+            .putString("strategy_name", config.strategyName)
+            .putString("sni", config.sni)
             .putString("dns", config.dns)
             .putString("ipv6_mode", config.ipv6Mode.name)
             .apply()
@@ -73,7 +79,24 @@ object ByeDpiConfigStore {
 
     fun setMode(context: Context, mode: ByeDpiMode) {
         val current = load(context)
-        save(context, current.copy(mode = mode))
+        save(context, current.copy(mode = mode, strategyName = null))
+    }
+
+    fun setCatalogStrategy(context: Context, name: String, command: String) {
+        val current = load(context)
+        save(
+            context,
+            current.copy(
+                mode = ByeDpiMode.MANUAL,
+                command = command,
+                strategyName = name,
+            ),
+        )
+    }
+
+    fun setSni(context: Context, sni: String) {
+        val current = load(context)
+        save(context, current.copy(sni = sni.trim().ifBlank { "google.com" }))
     }
 }
 
