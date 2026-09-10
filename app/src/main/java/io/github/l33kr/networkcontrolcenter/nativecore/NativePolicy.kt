@@ -25,11 +25,10 @@ data class NativePolicyDecision(
 )
 
 /**
- * Resolves the v2 profile/list model into actions owned by Native Engine.
+ * Resolves the profile/list model into actions owned by Native Engine.
  *
- * ByeDPI command strings are deliberately ignored here. Native Engine has its
- * own strategy store so legacy data can remain untouched for rollback/testing.
- * The first enabled matching profile wins; an empty-domain profile is catch-all.
+ * Only native:// commands are understood. Old ByeDPI argument strings are never
+ * interpreted by this resolver; they simply fall back to our Native default.
  */
 class NativePolicyResolver(private val context: Context) {
     fun resolve(host: String?, transport: NativeTransport): NativePolicyDecision {
@@ -62,7 +61,8 @@ class NativePolicyResolver(private val context: Context) {
                 )
             }
 
-            val strategy = NativePolicyStore.strategyForProfile(context, profile.id)
+            val strategy = NativeStrategies.fromCommand(profile.strategyCommand)
+                ?: NativePolicyStore.strategyForProfile(context, profile.id)
                 ?: NativePolicyStore.defaultStrategy(context)
 
             return NativePolicyDecision(
