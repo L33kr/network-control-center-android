@@ -25,9 +25,27 @@ data class StrategyTestResult(
 }
 
 object ByeDpiStrategyTester {
-    private val youtubeHosts = listOf(
+    /**
+     * A broader service coverage set than a single test domain.
+     *
+     * The list intentionally mixes YouTube page/API/media endpoints with Discord
+     * web/gateway/CDN endpoints. A strategy that opens only youtube.com but breaks
+     * googlevideo/ytimg should no longer be reported as fully working.
+     */
+    private val testHosts = listOf(
+        // YouTube / Google media
         "www.youtube.com",
+        "youtubei.googleapis.com",
+        "youtube.googleapis.com",
+        "i.ytimg.com",
+        "yt3.ggpht.com",
         "redirector.googlevideo.com",
+
+        // Discord
+        "discord.com",
+        "discord.gg",
+        "gateway.discord.gg",
+        "cdn.discordapp.com",
     )
 
     suspend fun run(
@@ -50,7 +68,7 @@ object ByeDpiStrategyTester {
                 strategyName = strategy.name,
                 sni = sni,
                 // Measure the strategy itself. A user's include/exclude list is applied
-                // only when the real VPN starts and must not skew YouTube test results.
+                // only when the real VPN starts and must not skew coverage test results.
                 domainFilterMode = DomainFilterMode.ALL,
                 domains = "",
             )
@@ -64,7 +82,7 @@ object ByeDpiStrategyTester {
                 var successes = 0
 
                 if (ready) {
-                    for (host in youtubeHosts) {
+                    for (host in testHosts) {
                         if (testTlsThroughSocks(host, port)) successes++
                     }
                 }
@@ -79,7 +97,7 @@ object ByeDpiStrategyTester {
                 StrategyTestResult(
                     strategy = strategy,
                     successCount = successes,
-                    totalCount = youtubeHosts.size,
+                    totalCount = testHosts.size,
                 )
             }
 
