@@ -20,29 +20,29 @@ object ProfileEngineBridge {
             return compiled
         }
 
-        // Android · strategies are a compatibility/diagnostic family. When one is
-        // assigned to an active TCP/TLS BYPASS profile, execute it directly rather
-        // than wrapping it in ProfileCompiler groups. This gives us a one-to-one
-        // comparison with ByeByeDPI and tells us whether profile compilation itself
-        // is breaking otherwise valid ByeDPI commands.
-        val directAndroidProfile = set.profiles.firstOrNull { profile ->
+        // Strategy Lab candidates are compatibility/diagnostic strategies derived
+        // from actual ByeByeDPI seeds. Run them raw instead of injecting profile
+        // -H/-K/-A groups, otherwise a valid seed can be changed before it reaches
+        // the native ByeDPI parser and we lose the one-to-one comparison.
+        val directSeedProfile = set.profiles.firstOrNull { profile ->
             profile.enabled &&
                 profile.action == ProfileAction.BYPASS &&
                 profile.protocol != ProfileProtocol.UDP_QUIC &&
-                profile.strategyName?.startsWith("Android ·") == true &&
+                isNativeSeedName(profile.strategyName) &&
                 !profile.strategyCommand.isNullOrBlank()
         }
 
-        if (directAndroidProfile != null) {
-            val exactByeByeControl = directAndroidProfile.strategyName
-                ?.contains("ByeBye raw default", ignoreCase = true) == true
+        if (directSeedProfile != null) {
             ByeDpiConfigStore.setManualStrategy(
                 context = context,
+                // The seed already contains the UDP behaviour chosen by the real
+                // ByeByeDPI template. Keep it byte-for-byte; do not append another
+                // -Ku group while we are validating strategy compatibility.
                 command = ByeDpiRuntimeStore.prepareNativeCommand(
-                    command = directAndroidProfile.strategyCommand.orEmpty(),
-                    addUdpFallback = !exactByeByeControl,
+                    command = directSeedProfile.strategyCommand.orEmpty(),
+                    addUdpFallback = false,
                 ),
-                name = "Native · ${directAndroidProfile.strategyName}",
+                name = "Native · ${directSeedProfile.strategyName}",
             )
             return compiled
         }
@@ -53,5 +53,12 @@ object ProfileEngineBridge {
             name = "Набор · ${set.name}",
         )
         return compiled
+    }
+
+    private fun isNativeSeedName(name: String?): Boolean {
+        val value = name.orEmpty()
+        return value.startsWith("Android ·") ||
+            value.startsWith("ByeDPI seed ") ||
+            value.startsWith("Seed ")
     }
 }
