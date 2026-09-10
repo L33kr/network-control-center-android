@@ -69,12 +69,19 @@ data class StrategySearchReport(
 object ByeDpiStrategyTester {
     private const val MAX_PARALLEL_HOSTS = 4
     private const val MAX_SAMPLE_HOSTS = 12
+    private const val GENERATED_SAMPLE_HOSTS = 4
+    private const val NORMAL_TIMEOUT_MS = 2500
+    private const val GENERATED_PRELIMINARY_TIMEOUT_MS = 1500
     private const val FINALISTS = 3
 
     /**
      * Build the coverage list from the user's real configuration, not from a
-     * hard-coded YouTube list. Every non-PASS named list participates, including
-     * custom lists and the legacy manual domain field from 0.4.x.
+     * hard-coded YouTube list. Every named list participates, including custom
+     * lists, the PASS/ignore list and the legacy manual field from 0.4.x.
+     *
+     * PASS-only hosts are kept in [StrategySearchReport.targets] so the UI can
+     * account for every configured domain, but they are not scored against a
+     * BYPASS strategy because intentionally passing them is not a strategy failure.
      */
     fun collectTargets(
         context: Context,
@@ -100,12 +107,9 @@ object ByeDpiStrategyTester {
         val manualDomains = linkedSetOf<String>()
 
         lists.forEach { list ->
-            // The built-in ignore list is an explicit PASS list; it is shown only
-            // if the same host also appears in another testable list.
-            if (list.id == ProfileStore.LIST_IGNORE) return@forEach
             list.domains.forEach { host ->
                 listNamesByDomain.getOrPut(host) { linkedSetOf() } += list.name
-                if (list.id == ProfileStore.LIST_USER || list.id.startsWith("list-")) {
+                if (list.id == ProfileStore.LIST_USER || list.id == ProfileStore.LIST_IGNORE || list.id.startsWith("list-")) {
                     manualDomains += host
                 }
             }
@@ -137,8 +141,12 @@ object ByeDpiStrategyTester {
 
     /**
      * Low-load strategy finder:
-     *  1) recommended/adapted candidates are tested on a representative sample;
-     *  2) only the three best candidates are verified against every configured host.
+     *  1) candidates are tested on a representative sample;
+     *  2) only the three best candidates are verified against every BYPASS host.
+     *
+     * When generated candidates participate, the first stage automatically uses
+     * just four representative hosts and a shorter timeout. This keeps Strategy
+     * Lab practical on a phone even when the user has dozens of custom domains.
      */
     suspend fun findBestAdaptive(
         context: Context,
@@ -153,13 +161,16 @@ object ByeDpiStrategyTester {
             return@withContext StrategySearchReport(targets, emptyList(), emptyList())
         }
 
-        val sample = representativeSample(eligible)
+        val generatedSearch = candidates.any { it.category == "Generator" }
+        val sampleLimit = if (generatedSearch) GENERATED_SAMPLE_HOSTS else MAX_SAMPLE_HOSTS
+        val preliminaryTimeout = if (generatedSearch) GENERATED_PRELIMINARY_TIMEOUT_MS else NORMAL_TIMEOUT_MS
+        val sample = representativeSample(eligible, sampleLimit)
         val preliminary = mutableListOf<StrategyTestResult>()
 
         candidates.forEachIndexed { index, strategy ->
             onProgress(
                 StrategySearchProgress(
-                    phase = "Быстрый отбор",
+                    phase = if (generatedSearch) "Генерация · быстрый отбор" else "Быстрый отбор",
                     strategyIndex = index + 1,
                     strategyTotal = candidates.size,
                     strategyName = strategy.name,
@@ -167,11 +178,18 @@ object ByeDpiStrategyTester {
                     currentTotal = sample.size,
                 ),
             )
-            val result = testStrategy(context, strategy, sni, sample, preliminary = true)
+            val result = testStrategy(
+                context = context,
+                strategy = strategy,
+                sni = sni,
+                targets = sample,
+                preliminary = true,
+                timeoutMs = preliminaryTimeout,
+            )
             preliminary += result
             onProgress(
                 StrategySearchProgress(
-                    phase = "Быстрый отбор",
+                    phase = if (generatedSearch) "Генерация · быстрый отбор" else "Быстрый отбор",
                     strategyIndex = index + 1,
                     strategyTotal = candidates.size,
                     strategyName = strategy.name,
@@ -195,7 +213,14 @@ object ByeDpiStrategyTester {
                     currentTotal = eligible.size,
                 ),
             )
-            val result = testStrategy(context, strategy, sni, eligible, preliminary = false)
+            val result = testStrategy(
+                context = context,
+                strategy = strategy,
+                sni = sni,
+                targets = eligible,
+                preliminary = false,
+                timeoutMs = NORMAL_TIMEOUT_MS,
+            )
             verified += result
             onProgress(
                 StrategySearchProgress(
@@ -223,31 +248,45 @@ object ByeDpiStrategyTester {
         set: ProfileSetModel = ProfileStore.activeSet(context),
     ): StrategyTestResult = withContext(Dispatchers.IO) {
         val eligible = collectTargets(context, set).filterNot { it.passOnly }
-        testStrategy(context, strategy, sni, eligible, preliminary = false)
+        testStrategy(
+            context = context,
+            strategy = strategy,
+            sni = sni,
+            targets = eligible,
+            preliminary = false,
+            timeoutMs = NORMAL_TIMEOUT_MS,
+        )
     }
 
-    private fun representativeSample(targets: List<StrategyTestTarget>): List<StrategyTestTarget> {
-        if (targets.size <= MAX_SAMPLE_HOSTS) return targets
+    private fun representativeSample(
+        targets: List<StrategyTestTarget>,
+        maxHosts: Int,
+    ): List<StrategyTestTarget> {
+        if (targets.size <= maxHosts) return targets
 
         val selected = linkedMapOf<String, StrategyTestTarget>()
 
-        // Manual entries are never silently ignored by the fast stage.
-        targets.filter { it.manual }.take(4).forEach { selected[it.host] = it }
+        // Manual entries get priority so the user never adds a host that the
+        // generator silently ignores during its first stage.
+        targets.filter { it.manual }.take((maxHosts / 2).coerceAtLeast(1)).forEach {
+            selected[it.host] = it
+        }
 
-        // Then take up to two hosts from each named list/service.
+        // Then represent as many named services/lists as the small sample allows.
         targets
             .flatMap { target -> target.listNames.map { it to target } }
             .groupBy({ it.first }, { it.second })
             .values
             .forEach { group ->
-                group.distinctBy { it.host }.take(2).forEach { selected[it.host] = it }
+                if (selected.size < maxHosts) {
+                    group.distinctBy { it.host }.firstOrNull()?.let { selected[it.host] = it }
+                }
             }
 
-        // Fill the remaining sample deterministically.
         targets.forEach { target ->
-            if (selected.size < MAX_SAMPLE_HOSTS) selected.putIfAbsent(target.host, target)
+            if (selected.size < maxHosts) selected.putIfAbsent(target.host, target)
         }
-        return selected.values.take(MAX_SAMPLE_HOSTS)
+        return selected.values.take(maxHosts)
     }
 
     private suspend fun testStrategy(
@@ -256,6 +295,7 @@ object ByeDpiStrategyTester {
         sni: String,
         targets: List<StrategyTestTarget>,
         preliminary: Boolean,
+        timeoutMs: Int,
     ): StrategyTestResult = coroutineScope {
         if (targets.isEmpty()) return@coroutineScope StrategyTestResult(strategy, emptyList(), preliminary)
 
@@ -282,7 +322,7 @@ object ByeDpiStrategyTester {
             val semaphore = Semaphore(MAX_PARALLEL_HOSTS)
             targets.map { target ->
                 async(Dispatchers.IO) {
-                    semaphore.withPermit { probeTls(target, port) }
+                    semaphore.withPermit { probeTls(target, port, timeoutMs) }
                 }
             }.awaitAll()
         } else {
@@ -323,10 +363,10 @@ object ByeDpiStrategyTester {
         return false
     }
 
-    private fun probeTls(target: StrategyTestTarget, port: Int): DomainProbeResult {
+    private fun probeTls(target: StrategyTestTarget, port: Int, timeoutMs: Int): DomainProbeResult {
         var success = false
         val elapsed = measureTimeMillis {
-            success = testTlsThroughSocks(target.host, port)
+            success = testTlsThroughSocks(target.host, port, timeoutMs)
         }
         return DomainProbeResult(
             target = target,
@@ -335,15 +375,15 @@ object ByeDpiStrategyTester {
         )
     }
 
-    private fun testTlsThroughSocks(host: String, port: Int): Boolean = runCatching {
+    private fun testTlsThroughSocks(host: String, port: Int, timeoutMs: Int): Boolean = runCatching {
         val socks = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
         val raw = Socket(socks)
-        raw.soTimeout = 2500
-        raw.connect(InetSocketAddress.createUnresolved(host, 443), 2500)
+        raw.soTimeout = timeoutMs
+        raw.connect(InetSocketAddress.createUnresolved(host, 443), timeoutMs)
 
         val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
         val ssl = factory.createSocket(raw, host, 443, true) as SSLSocket
-        ssl.soTimeout = 2500
+        ssl.soTimeout = timeoutMs
         ssl.sslParameters = ssl.sslParameters.apply {
             serverNames = listOf(SNIHostName(host))
         }
