@@ -14,6 +14,7 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.l33kr.networkcontrolcenter.MainActivity
+import io.github.l33kr.networkcontrolcenter.R
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -209,7 +210,7 @@ class TgWsProxyService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Telegram WS Proxy",
+            "DPI Control · Telegram",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             description = "Локальный MTProto/WebSocket прокси"
@@ -235,8 +236,8 @@ class TgWsProxyService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentTitle("Network Control Center · Telegram")
+            .setSmallIcon(R.drawable.ic_stat_dpi)
+            .setContentTitle("DPI Control · Telegram")
             .setContentText(text)
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", stop)
@@ -258,7 +259,7 @@ class TgWsProxyService : Service() {
             wakeLock?.takeIf { it.isHeld }?.release()
             wakeLock = manager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "NetworkControlCenter:TgWs",
+                "DPIControl:TgWs",
             ).apply { acquire(30L * 60L * 1000L) }
         }.onFailure { Log.w(TAG, "Could not acquire wake lock", it) }
     }
