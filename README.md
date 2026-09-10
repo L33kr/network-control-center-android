@@ -1,41 +1,76 @@
 # Network Control Center Android
 
-Unified Android network utility combining two independent local engines:
+Standalone Android application that combines two independent local network engines in one UI.
 
-- **ByeDPI** — system traffic processing through Android `VpnService` + local SOCKS5/tun2socks.
-- **TG WS Proxy** — local MTProto proxy for Telegram with WebSocket/Cloudflare transport.
+- **ByeDPI** — planned system traffic processing through Android `VpnService` + local SOCKS5/tun2socks.
+- **TG WS Proxy** — integrated local MTProto proxy for Telegram with WebSocket/Cloudflare transport.
 
-The project is being developed as a new standalone application. It does not modify or submit pull requests to upstream projects.
+The project does not modify or submit pull requests to upstream projects.
 
-## Planned architecture
+## Current status
+
+### Telegram WS — integrated
+
+The first functional engine is connected to the application:
 
 ```text
-Android app
-├── app UI / service coordinator
-├── ByeDPI engine
-│   ├── Android VpnService
-│   ├── hev-socks5-tunnel
-│   └── ByeDPI core
-└── Telegram engine
-    ├── local MTProto listener
-    └── TG WS Proxy native core
+Telegram
+   ↓
+127.0.0.1:1443
+   ↓
+TG WS native engine (Rust / libtgwsproxy.so)
+   ↓
+WSS / Cloudflare or direct Telegram DC
 ```
 
-Both engines are intended to work independently:
+The main screen can start/stop the foreground proxy service and open Telegram with a generated `tg://proxy` configuration.
 
-- ByeDPI OFF / TG WS OFF — normal connection
-- ByeDPI ON / TG WS OFF — general traffic processing
-- ByeDPI OFF / TG WS ON — Telegram only
-- ByeDPI ON / TG WS ON — both engines enabled
+TG WS native libraries are currently pinned to:
 
-## First milestones
+`L33kr/tg-ws-proxy-android@94d0620aff9a9e0dd08a1f9688a904da09df497e`
 
-1. Modern Android/Compose shell and unified service state.
-2. Integrate the TG WS native engine as a standalone module.
-3. Integrate a current ByeDPI core and tun2socks path.
-4. Add safe routing so native engine sockets cannot loop back into the VPN.
-5. Add Wi‑Fi/mobile network detection, IPv4/IPv6 awareness and per-network profiles.
-6. Add diagnostics and logs for DNS/TCP/UDP/QUIC/Telegram connectivity.
+They are kept outside this repository so the native engine can be updated independently.
+
+### ByeDPI — next integration step
+
+The UI/state boundary already exists, but the VPN engine is intentionally disabled until the current ByeDPI core, hev-socks5-tunnel and safe Android routing are connected.
+
+## Architecture
+
+```text
+Network Control Center
+├── Compose UI
+├── UnifiedEngineController
+├── TG WS
+│   ├── TgWsProxyService
+│   ├── TgWsController
+│   ├── TgWsNative (JNA)
+│   └── libtgwsproxy.so
+└── ByeDPI (next)
+    ├── Android VpnService
+    ├── hev-socks5-tunnel
+    └── current ByeDPI core
+```
+
+## Build
+
+The project uses Java 17. TG WS native libraries need to be placed under `third_party/tg-ws-proxy-android` first.
+
+Windows PowerShell:
+
+```powershell
+.\scripts\bootstrap-tgws.ps1
+gradle :app:assembleDebug
+```
+
+Linux/macOS:
+
+```bash
+./scripts/bootstrap-tgws.sh
+gradle :app:assembleDebug
+```
+
+GitHub Actions performs the same pinned dependency checkout automatically and uploads the debug APK as a workflow artifact.
 
 ## Upstream projects
 
@@ -44,6 +79,11 @@ Both engines are intended to work independently:
 - https://github.com/heiher/hev-socks5-tunnel
 - https://github.com/L33kr/tg-ws-proxy-android
 
-## Status
+## Roadmap
 
-Early development.
+1. ✅ Modern Android/Compose shell and unified service state.
+2. ✅ TG WS native engine integration.
+3. ⏳ Current ByeDPI core + hev-socks5-tunnel integration.
+4. ⏳ Safe VPN/native socket routing without loops.
+5. ⏳ Wi-Fi/mobile detection, IPv4/IPv6 auto mode and per-network profiles.
+6. ⏳ DNS/TCP/UDP/QUIC/Telegram diagnostics and unified logs.
