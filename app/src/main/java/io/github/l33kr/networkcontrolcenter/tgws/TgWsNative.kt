@@ -39,7 +39,18 @@ object TgWsNative {
         library.SetCfProxyConfig(if (enabled) 1 else 0, 1, userDomain)
     }
 
-    fun setWorkerDomains(domains: String) = library.SetCfWorkerDomains(domains)
+    /**
+     * Some prebuilt libtgwsproxy.so files from the v1.3.0 Android fork were
+     * produced before SetCfWorkerDomains was exported, while the Kotlin wrapper
+     * already referenced it. Treat it as an optional capability so the core
+     * proxy can still start. A source-built native library will expose it.
+     */
+    fun trySetWorkerDomains(domains: String): Boolean {
+        if (domains.isBlank()) return true
+        return runCatching {
+            library.SetCfWorkerDomains(domains)
+        }.isSuccess
+    }
 
     fun secretWithPrefix(): String? = readNativeString { library.GetSecretWithPrefix() }
 
