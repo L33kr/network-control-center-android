@@ -22,6 +22,7 @@ data class NativePolicyDecision(
     val profileName: String,
     val matchedDomain: String? = null,
     val strategyTitle: String? = null,
+    val shouldBypass: Boolean = false,
 )
 
 /**
@@ -45,13 +46,13 @@ class NativePolicyResolver(private val context: Context) {
                     profileName = profile.name,
                     matchedDomain = match,
                     strategyTitle = "PASS",
+                    shouldBypass = false,
                 )
             }
 
             val nativePreset = NativeStrategies.fromCommand(profile.strategyCommand)
             val technique = when (transport) {
-                // UDP/QUIC is intentionally transparent in alpha 1. It remains
-                // functional while the dedicated QUIC manipulator is developed.
+                // Dedicated QUIC manipulation is separate from TCP techniques.
                 NativeTransport.UDP -> NativeTechnique.PASS
                 NativeTransport.TCP -> nativePreset?.technique ?: NativeTechnique.HYBRID
             }
@@ -60,6 +61,7 @@ class NativePolicyResolver(private val context: Context) {
                 profileName = profile.name,
                 matchedDomain = match,
                 strategyTitle = nativePreset?.title ?: "Auto / Hybrid",
+                shouldBypass = true,
             )
         }
 
@@ -67,6 +69,7 @@ class NativePolicyResolver(private val context: Context) {
             technique = NativeTechnique.PASS,
             profileName = "Остальной трафик",
             strategyTitle = "PASS",
+            shouldBypass = false,
         )
     }
 
