@@ -2,6 +2,7 @@ package io.github.l33kr.networkcontrolcenter.ui.v2
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -49,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiConfigStore
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyCatalog
+import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyPlan
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyTester
 import io.github.l33kr.networkcontrolcenter.byedpi.CatalogStrategy
 import io.github.l33kr.networkcontrolcenter.byedpi.StrategyPreferences
@@ -72,7 +74,9 @@ fun StrategyCenterScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val catalog = remember { ByeDpiStrategyCatalog.load(context) }
-    val targets = remember(activeSet, domainLists) { ByeDpiStrategyTester.collectTargets(context, activeSet) }
+    val targets = remember(activeSet, domainLists) {
+        ByeDpiStrategyTester.collectTargets(context, activeSet)
+    }
 
     var query by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("Рекомендуемые") }
@@ -84,11 +88,16 @@ fun StrategyCenterScreen(
     var pendingApply by remember { mutableStateOf<CatalogStrategy?>(null) }
     var expandedResultId by remember { mutableStateOf<String?>(null) }
     var customName by remember { mutableStateOf("Моя стратегия") }
-    var customCommand by remember { mutableStateOf("-Kt,h -o1 -a1") }
+    var customCommand by remember { mutableStateOf("-o1 -a1 -r-5+se") }
 
-    val categories = remember(catalog) {
-        listOf("Рекомендуемые", "ZapretGUI", "Mobile", "QUIC", "Избранные", "Все")
-    }
+    val categories = listOf(
+        "Рекомендуемые",
+        "Android",
+        "ByeByeDPI",
+        "QUIC",
+        "Избранные",
+        "Все",
+    )
 
     val filtered = remember(catalog, query, selectedCategory, favorites) {
         catalog.filter { strategy ->
@@ -109,6 +118,31 @@ fun StrategyCenterScreen(
         }
     }
 
+    fun startSearch(deep: Boolean) {
+        if (isTesting || !enabled || targets.none { !it.passOnly }) return
+        isTesting = true
+        report = null
+        singleResult = null
+        scope.launch {
+            report = try {
+                ByeDpiStrategyTester.findBestAdaptive(
+                    context = context,
+                    sni = ByeDpiConfigStore.load(context).sni,
+                    set = activeSet,
+                    candidates = if (deep) {
+                        ByeDpiStrategyCatalog.deepCandidates(context)
+                    } else {
+                        ByeDpiStrategyCatalog.quickCandidates(context)
+                    },
+                    onProgress = { progress = it },
+                )
+            } finally {
+                isTesting = false
+                progress = null
+            }
+        }
+    }
+
     pendingApply?.let { strategy ->
         ApplyStrategyDialog(
             strategy = strategy,
@@ -123,19 +157,19 @@ fun StrategyCenterScreen(
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
             Text(
-                "Стратегии",
+                "Стратегии ByeDPI",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "Адаптированные идеи zapretgui + совместимые стратегии ByeDPI. " +
-                    "Стратегия назначается конкретному профилю, а не всему VPN.",
+                "Здесь стратегия — это полная цепочка ByeDPI. Внутренние -A переходы " +
+                    "не упрощаются и сохраняются при назначении профилю.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -149,70 +183,39 @@ fun StrategyCenterScreen(
         }
 
         item {
-            Card(
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-            ) {
-                Column(
-                    modifier = Modifier.padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+            SearchCard(
+                enabled = enabled,
+                isTesting = isTesting,
+                progress = progress,
+                onQuick = { startSearch(false) },
+                onDeep = { startSearch(true) },
+            )
+        }
+
+        if (!enabled) {
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
                 ) {
-                    Text("Автопоиск", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Text(
-                        "Сначала короткий отбор, затем 3 лучших варианта проверяются по всем вашим доменам. " +
-                            "Ручные домены тоже входят в итог X/Y.",
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        "Чтобы тестировать стратегии, сначала останови ByeDPI. " +
+                            "Сам каталог и просмотр цепочек доступны всегда.",
+                        modifier = Modifier.padding(14.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-
-                    if (isTesting) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        progress?.let { value ->
-                            Text(
-                                "${value.phase}: ${value.strategyIndex}/${value.strategyTotal} · ${value.strategyName}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            if (value.currentTotal > 0) {
-                                Text(
-                                    "Проверено: ${value.currentSuccess}/${value.currentTotal}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                )
-                            }
-                        }
-                    }
-
-                    Button(
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isTesting && targets.any { !it.passOnly },
-                        onClick = {
-                            isTesting = true
-                            report = null
-                            singleResult = null
-                            scope.launch {
-                                report = try {
-                                    ByeDpiStrategyTester.findBestAdaptive(
-                                        context = context,
-                                        sni = ByeDpiConfigStore.load(context).sni,
-                                        set = activeSet,
-                                        onProgress = { progress = it },
-                                    )
-                                } finally {
-                                    isTesting = false
-                                    progress = null
-                                }
-                            }
-                        },
-                    ) {
-                        Icon(Icons.Rounded.Search, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Найти лучшую")
-                    }
                 }
             }
         }
 
         report?.let { currentReport ->
             item {
-                Text("Результаты автопоиска", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Результаты поиска",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
             }
             items(currentReport.verified, key = { "verified-${it.strategy.id}" }) { result ->
                 StrategyResultCard(
@@ -229,7 +232,11 @@ fun StrategyCenterScreen(
 
         singleResult?.let { result ->
             item {
-                Text("Последняя проверка", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Последняя проверка",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
             }
             item {
                 StrategyResultCard(
@@ -245,7 +252,11 @@ fun StrategyCenterScreen(
         }
 
         item {
-            Text("Ручная стратегия", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Ручная цепочка",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+            )
         }
         item {
             Card(shape = RoundedCornerShape(20.dp)) {
@@ -253,6 +264,11 @@ fun StrategyCenterScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    Text(
+                        "Можно вставить полную многоступенчатую команду ByeDPI. " +
+                            "Переносы строк допустимы: они нужны только для удобства чтения.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     OutlinedTextField(
                         modifier = Modifier.fillMaxWidth(),
                         value = customName,
@@ -264,9 +280,15 @@ fun StrategyCenterScreen(
                         modifier = Modifier.fillMaxWidth(),
                         value = customCommand,
                         onValueChange = { customCommand = it },
-                        label = { Text("Аргументы ByeDPI") },
-                        minLines = 2,
+                        label = { Text("Полная команда ByeDPI") },
+                        minLines = 4,
                         textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    )
+                    val customStages = ByeDpiStrategyPlan.parse(customCommand)
+                    Text(
+                        "Распознано стадий: ${customStages.size.coerceAtLeast(1)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     OutlinedButton(
                         modifier = Modifier.fillMaxWidth(),
@@ -278,7 +300,7 @@ fun StrategyCenterScreen(
                                 name = customName.trim().ifBlank { "Моя стратегия" },
                                 command = customCommand.trim(),
                                 category = "Custom",
-                                description = "Пользовательская стратегия",
+                                description = "Пользовательская полная цепочка ByeDPI",
                                 source = "Пользователь",
                             )
                         },
@@ -350,6 +372,71 @@ fun StrategyCenterScreen(
 }
 
 @Composable
+private fun SearchCard(
+    enabled: Boolean,
+    isTesting: Boolean,
+    progress: StrategySearchProgress?,
+    onQuick: () -> Unit,
+    onDeep: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Поиск рабочей цепочки", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Быстрый поиск использует реальные ByeDPI seeds. Глубокий дополнительно " +
+                    "перебирает исходные длинные многоступенчатые цепочки ByeByeDPI.",
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+
+            if (isTesting) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                progress?.let { value ->
+                    Text(
+                        "${value.phase}: ${value.strategyIndex}/${value.strategyTotal} · ${value.strategyName}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (value.currentTotal > 0) {
+                        Text(
+                            "HTTPS: ${value.currentSuccess}/${value.currentTotal}",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+            }
+
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled && !isTesting,
+                onClick = onQuick,
+            ) {
+                Icon(Icons.Rounded.Search, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Быстрый поиск")
+            }
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled && !isTesting,
+                onClick = onDeep,
+            ) {
+                Text("Глубокий поиск ByeDPI")
+            }
+            Text(
+                "Глубокий поиск заметно дольше. Финалисты всё равно перепроверяются по всем " +
+                    "BYPASS-доменам, включая добавленные вручную.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        }
+    }
+}
+
+@Composable
 private fun CoverageSummaryCard(total: Int, manual: Int, passOnly: Int) {
     Card(shape = RoundedCornerShape(20.dp)) {
         Column(
@@ -359,7 +446,7 @@ private fun CoverageSummaryCard(total: Int, manual: Int, passOnly: Int) {
             Text("Домены для проверки", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text("Всего: $total · ручных: $manual · PASS: $passOnly")
             Text(
-                "PASS-домены отображаются, но не снижают оценку стратегии.",
+                "PASS-домены видны в конфигурации, но не снижают рейтинг BYPASS-стратегии.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -377,6 +464,9 @@ private fun StrategyCard(
     onTest: () -> Unit,
     onApply: () -> Unit,
 ) {
+    var chainExpanded by remember(strategy.id) { mutableStateOf(false) }
+    val stages = remember(strategy.command) { ByeDpiStrategyPlan.parse(strategy.command) }
+
     Card(shape = RoundedCornerShape(20.dp)) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -403,27 +493,46 @@ private fun StrategyCard(
                 }
             }
 
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StageBadge("${stages.size.coerceAtLeast(1)} стадий")
+                if (stages.size > 1) StageBadge("fallback chain")
+            }
+
             if (strategy.description.isNotBlank()) {
                 Text(strategy.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-            ) {
-                Text(
-                    strategy.command,
-                    modifier = Modifier.padding(10.dp),
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            if (stages.size <= 1) {
+                CommandSurface(strategy.command, maxLines = 5)
+            } else if (chainExpanded) {
+                stages.forEach { stage ->
+                    StageSurface(
+                        index = stage.index,
+                        trigger = stage.trigger,
+                        arguments = stage.arguments,
+                    )
+                }
+                TextButton(onClick = { chainExpanded = false }) {
+                    Icon(Icons.Rounded.ExpandLess, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Свернуть цепочку")
+                }
+            } else {
+                StageSurface(
+                    index = stages.first().index,
+                    trigger = stages.first().trigger,
+                    arguments = stages.first().arguments,
                 )
+                TextButton(onClick = { chainExpanded = true }) {
+                    Icon(Icons.Rounded.ExpandMore, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Показать все ${stages.size} стадий")
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
-                    enabled = !testing && strategy.protocol == "TCP/TLS",
+                    enabled = enabled && !testing && strategy.protocol == "TCP/TLS",
                     onClick = onTest,
                 ) {
                     Icon(Icons.Rounded.PlayArrow, contentDescription = null)
@@ -439,6 +548,62 @@ private fun StrategyCard(
 }
 
 @Composable
+private fun StageBadge(text: String) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+    }
+}
+
+@Composable
+private fun StageSurface(index: Int, trigger: String?, arguments: List<String>) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column(
+            modifier = Modifier.padding(11.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                "Этап $index · ${ByeDpiStrategyPlan.triggerLabel(trigger)}",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                arguments.joinToString(" "),
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CommandSurface(command: String, maxLines: Int) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Text(
+            command,
+            modifier = Modifier.padding(10.dp),
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+    }
+}
+
+@Composable
 private fun StrategyResultCard(
     result: StrategyTestResult,
     expanded: Boolean,
@@ -446,6 +611,10 @@ private fun StrategyResultCard(
     onApply: () -> Unit,
     enabled: Boolean,
 ) {
+    val stages = remember(result.strategy.command) {
+        ByeDpiStrategyPlan.parse(result.strategy.command)
+    }
+
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
@@ -468,22 +637,40 @@ private fun StrategyResultCard(
                 Column(modifier = Modifier.fillMaxWidth(0.75f)) {
                     Text(result.strategy.name, fontWeight = FontWeight.Bold)
                     Text(
-                        "Работает ${result.successCount}/${result.totalCount} · ${result.percent}%" +
-                            (result.averageLatencyMs?.let { " · ~${it} мс" } ?: ""),
-                        color = if (result.percent == 100) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        "HTTPS ${result.successCount}/${result.totalCount} · ${result.percent}%" +
+                            (result.averageLatencyMs?.let { " · ~${it} мс" } ?: "") +
+                            " · ${stages.size.coerceAtLeast(1)} стадий",
+                        color = if (result.percent == 100) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 }
                 IconButton(onClick = onExpand) {
-                    Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, contentDescription = null)
+                    Icon(
+                        if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = null,
+                    )
                 }
             }
 
             if (expanded) {
+                if (stages.size > 1) {
+                    Text("Цепочка ByeDPI", fontWeight = FontWeight.SemiBold)
+                    stages.forEach { stage ->
+                        StageSurface(stage.index, stage.trigger, stage.arguments)
+                    }
+                } else {
+                    CommandSurface(result.strategy.command, maxLines = 8)
+                }
+
+                Text("Домены", fontWeight = FontWeight.SemiBold)
                 result.probes.forEach { probe ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalAlignment = Alignment.Top,
                     ) {
                         Text(if (probe.success) "✓" else "✕", fontWeight = FontWeight.Bold)
                         Column(modifier = Modifier.fillMaxWidth(0.90f)) {
@@ -492,11 +679,20 @@ private fun StrategyResultCard(
                                 buildString {
                                     append(probe.target.listNames.joinToString(", "))
                                     if (probe.target.manual) append(" · ручной")
+                                    probe.httpCode?.let { append(" · HTTP $it") }
+                                    if (probe.bytesRead > 0) append(" · ${probe.bytesRead} B")
                                     probe.latencyMs?.let { append(" · ${it} мс") }
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (!probe.success && !probe.error.isNullOrBlank()) {
+                                Text(
+                                    probe.error,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
                         }
                     }
                 }
@@ -522,7 +718,11 @@ private fun ApplyStrategyDialog(
         it.enabled && it.action == ProfileAction.BYPASS &&
             (strategy.protocol == "UDP/QUIC" || it.protocol != ProfileProtocol.UDP_QUIC)
     }.filter {
-        if (strategy.protocol == "UDP/QUIC") it.protocol == ProfileProtocol.UDP_QUIC || it.protocol == ProfileProtocol.ANY else true
+        if (strategy.protocol == "UDP/QUIC") {
+            it.protocol == ProfileProtocol.UDP_QUIC || it.protocol == ProfileProtocol.ANY
+        } else {
+            true
+        }
     }
 
     AlertDialog(
@@ -531,6 +731,11 @@ private fun ApplyStrategyDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(strategy.name, fontWeight = FontWeight.Bold)
+                Text(
+                    "Полная цепочка: ${strategy.stageCount} стадий",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (profiles.isEmpty()) {
                     Text("В активном наборе нет совместимого BYPASS-профиля.")
                 } else {
@@ -546,6 +751,8 @@ private fun ApplyStrategyDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        },
     )
 }
