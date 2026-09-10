@@ -1,9 +1,13 @@
 package io.github.l33kr.networkcontrolcenter
 
+import android.app.Activity
+import android.net.VpnService
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,8 +43,29 @@ class MainActivity : ComponentActivity() {
                 val controller = remember {
                     AndroidUnifiedEngineController(applicationContext)
                 }
+                val scope = rememberCoroutineScope()
+                val vpnPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.StartActivityForResult(),
+                ) { result ->
+                    if (result.resultCode == Activity.RESULT_OK) {
+                        scope.launch { controller.startByeDpi() }
+                    }
+                }
+
                 NetworkControlCenterScreen(
                     controller = controller,
+                    onByeDpiChange = { enabled ->
+                        if (!enabled) {
+                            scope.launch { controller.stopByeDpi() }
+                        } else {
+                            val permissionIntent = VpnService.prepare(this@MainActivity)
+                            if (permissionIntent == null) {
+                                scope.launch { controller.startByeDpi() }
+                            } else {
+                                vpnPermissionLauncher.launch(permissionIntent)
+                            }
+                        }
+                    },
                     onApplyTelegramProxy = {
                         val opened = TgWsController.openTelegramProxy(applicationContext)
                         if (!opened) {
@@ -60,6 +85,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun NetworkControlCenterScreen(
     controller: AndroidUnifiedEngineController,
+    onByeDpiChange: (Boolean) -> Unit,
     onApplyTelegramProxy: () -> Unit,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
@@ -75,17 +101,17 @@ private fun NetworkControlCenterScreen(
         ) {
             Text("Network Control Center", style = MaterialTheme.typography.headlineMedium)
             Text(
-                "Два независимых движка в одном приложении.",
+                "ByeDPI для общего трафика и отдельный WS-маршрут для Telegram.",
                 style = MaterialTheme.typography.bodyMedium,
             )
 
             EngineCard(
                 title = "Интернет / ByeDPI",
-                subtitle = "Системный трафик через Android VPN и ByeDPI · следующий этап",
+                subtitle = "Android VPN → hev-socks5-tunnel → актуальное ядро ByeDPI",
                 status = state.byeDpi,
-                checked = false,
-                switchEnabled = false,
-                onEnabledChange = {},
+                checked = state.byeDpi == EngineStatus.RUNNING || state.byeDpi == EngineStatus.STARTING,
+                switchEnabled = state.byeDpi != EngineStatus.STOPPING,
+                onEnabledChange = onByeDpiChange,
             )
 
             EngineCard(
@@ -111,13 +137,7 @@ private fun NetworkControlCenterScreen(
 
             Spacer(Modifier.height(4.dp))
             Text(
-                when (state.tgWs) {
-                    EngineStatus.STOPPED -> "Telegram WS выключен"
-                    EngineStatus.STARTING -> "Telegram WS запускается…"
-                    EngineStatus.RUNNING -> "Telegram WS работает на 127.0.0.1:1443"
-                    EngineStatus.STOPPING -> "Telegram WS останавливается…"
-                    EngineStatus.FAILED -> "Telegram WS: ошибка запуска"
-                },
+                "Оба движка независимы: Telegram WS можно использовать как вместе с ByeDPI, так и отдельно.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
