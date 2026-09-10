@@ -1,0 +1,46 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Network Control Center
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned TG WS engine
+        uses: actions/checkout@v4
+        with:
+          repository: L33kr/tg-ws-proxy-android
+          ref: 94d0620aff9a9e0dd08a1f9688a904da09df497e
+          path: third_party/tg-ws-proxy-android
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-control-center-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
