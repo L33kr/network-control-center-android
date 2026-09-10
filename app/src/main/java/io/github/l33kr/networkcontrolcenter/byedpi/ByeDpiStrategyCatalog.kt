@@ -61,8 +61,9 @@ object ByeDpiStrategyCatalog {
                 lines
                     .map(String::trim)
                     .filter { it.isNotEmpty() && !it.startsWith("#") }
-                    .mapIndexed { index, command ->
-                        val stages = ByeDpiStrategyPlan.stageCount(command)
+                    .mapIndexed { index, rawCommand ->
+                        val normalized = shellSplit(rawCommand).joinToString(" ")
+                        val stages = ByeDpiStrategyPlan.stageCount(normalized)
                         CatalogStrategy(
                             index = 40_000 + index,
                             id = "legacy-${index + 1}",
@@ -71,7 +72,9 @@ object ByeDpiStrategyCatalog {
                             } else {
                                 "ByeByeDPI · ${index + 1}"
                             },
-                            command = command,
+                            // Only whitespace changes: each -A fallback starts on a new
+                            // line so the UI reflects the real strategy structure.
+                            command = ByeDpiStrategyPlan.formatForDisplay(normalized),
                             category = "ByeByeDPI",
                             description = if (stages > 1) {
                                 "Оригинальная многоступенчатая стратегия из proxytest_strategies.list. " +
@@ -85,21 +88,18 @@ object ByeDpiStrategyCatalog {
                     }
                     .toList()
             }
-        return (androidNative + quic + legacy).distinctBy { it.command }
+        return (androidNative + quic + legacy)
+            .distinctBy { shellSplit(it.command).joinToString(" ") }
     }
 
-    /**
-     * Quick search starts from exact Android-safe ByeByeDPI seeds and their
-     * one-dimensional descendants. Multi-stage seeds remain multi-stage.
-     */
     fun quickCandidates(context: Context): List<CatalogStrategy> = ByeDpiStrategyGenerator.quick()
         .filter { it.protocol == "TCP/TLS" }
-        .distinctBy { it.command }
+        .distinctBy { shellSplit(it.command).joinToString(" ") }
 
     fun deepCandidates(context: Context): List<CatalogStrategy> = (
         ByeDpiStrategyGenerator.deep() +
             load(context).filter { it.category == "ByeByeDPI" && it.protocol == "TCP/TLS" }
-        ).distinctBy { it.command }
+        ).distinctBy { shellSplit(it.command).joinToString(" ") }
 
     fun find(context: Context, id: String): CatalogStrategy? = load(context).firstOrNull { it.id == id }
 }
