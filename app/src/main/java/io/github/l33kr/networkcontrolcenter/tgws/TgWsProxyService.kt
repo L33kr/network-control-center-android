@@ -18,6 +18,9 @@ import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TgWsProxyService : Service() {
@@ -34,6 +37,12 @@ class TgWsProxyService : Service() {
 
         private val _status = MutableStateFlow(EngineStatus.STOPPED)
         val status: StateFlow<EngineStatus> = _status.asStateFlow()
+
+        private val _activePort = MutableStateFlow(0)
+        val activePort: StateFlow<Int> = _activePort.asStateFlow()
+
+        private val _lastError = MutableStateFlow<String?>(null)
+        val lastError: StateFlow<String?> = _lastError.asStateFlow()
     }
 
     override fun onCreate() {
@@ -53,6 +62,8 @@ class TgWsProxyService : Service() {
         if (_status.value == EngineStatus.STARTING || _status.value == EngineStatus.RUNNING) return
 
         stopping.set(false)
+        _lastError.value = null
+        _activePort.value = 0
         _status.value = EngineStatus.STARTING
         startForegroundCompat(createNotification("Запуск Telegram WS…"))
         acquireWakeLock()
@@ -60,6 +71,14 @@ class TgWsProxyService : Service() {
         Thread({
             try {
                 val config = TgWsConfigStore.load(this)
+                val selectedPort = selectPort(config.bindIp, config.port)
+                    ?: throw IllegalStateException("Нет свободного локального порта рядом с ${config.port}")
+
+                if (selectedPort != config.port) {
+                    Log.w(TAG, "Port ${config.port} is busy, using $selectedPort")
+                    updateNotification("Порт ${config.port} занят · пробуем $selectedPort")
+                }
+
                 TgWsNative.setPoolSize(config.poolSize)
                 TgWsNative.setCloudflareCacheDir(cacheDir.absolutePath)
                 TgWsNative.setCloudflare(config.cloudflareEnabled, config.cloudflareDomain)
@@ -67,28 +86,30 @@ class TgWsProxyService : Service() {
 
                 val result = TgWsNative.start(
                     host = config.bindIp,
-                    port = config.port,
+                    port = selectedPort,
                     dcIps = config.dcIps,
                     secret = config.secret,
                     verbose = true,
                 )
 
                 if (result == 0 && !stopping.get()) {
+                    _activePort.value = selectedPort
+                    _lastError.value = null
                     _status.value = EngineStatus.RUNNING
-                    updateNotification("127.0.0.1:${config.port} · работает")
-                    Log.i(TAG, "TG WS proxy started on ${config.bindIp}:${config.port}")
+                    updateNotification("127.0.0.1:$selectedPort · работает")
+                    Log.i(TAG, "TG WS proxy started on ${config.bindIp}:$selectedPort")
                 } else if (!stopping.get()) {
-                    _status.value = EngineStatus.FAILED
-                    updateNotification("Ошибка запуска: $result")
+                    fail(nativeErrorText(result))
                     Log.e(TAG, "TG WS StartProxy returned $result")
-                    releaseWakeLock()
                 }
             } catch (t: Throwable) {
                 if (!stopping.get()) {
-                    _status.value = EngineStatus.FAILED
-                    updateNotification("Ошибка: ${t.message ?: t.javaClass.simpleName}")
+                    val details = buildString {
+                        append(t.javaClass.simpleName)
+                        t.message?.takeIf { it.isNotBlank() }?.let { append(": $it") }
+                    }
+                    fail(details)
                     Log.e(TAG, "TG WS startup failed", t)
-                    releaseWakeLock()
                 }
             }
         }, "tg-ws-start").apply {
@@ -96,6 +117,47 @@ class TgWsProxyService : Service() {
             start()
         }
     }
+
+    private fun fail(message: String) {
+        _activePort.value = 0
+        _lastError.value = message
+        _status.value = EngineStatus.FAILED
+        updateNotification("Ошибка: $message")
+        releaseWakeLock()
+    }
+
+    private fun nativeErrorText(code: Int): String = when (code) {
+        -1 -> "native -1: прокси уже запущен"
+        -3 -> "native -3: не удалось открыть локальный порт"
+        else -> "native $code"
+    }
+
+    private fun selectPort(host: String, preferredPort: Int): Int? {
+        if (isPortAvailable(host, preferredPort)) return preferredPort
+
+        // Keep the selected port predictable for the Telegram deep link, while
+        // avoiding collisions with a separately installed TG WS proxy.
+        for (port in (preferredPort + 1)..(preferredPort + 20).coerceAtMost(65535)) {
+            if (isPortAvailable(host, port)) return port
+        }
+
+        // Last resort: ask the OS for an ephemeral loopback port.
+        return runCatching {
+            ServerSocket().use { socket ->
+                socket.reuseAddress = false
+                socket.bind(InetSocketAddress(InetAddress.getByName(host), 0))
+                socket.localPort
+            }
+        }.getOrNull()
+    }
+
+    private fun isPortAvailable(host: String, port: Int): Boolean = runCatching {
+        ServerSocket().use { socket ->
+            socket.reuseAddress = false
+            socket.bind(InetSocketAddress(InetAddress.getByName(host), port))
+        }
+        true
+    }.getOrDefault(false)
 
     private fun stopProxy() {
         if (_status.value == EngineStatus.STOPPED || !stopping.compareAndSet(false, true)) return
@@ -106,6 +168,8 @@ class TgWsProxyService : Service() {
             runCatching { TgWsNative.stop() }
                 .onFailure { Log.w(TAG, "TG WS stop failed", it) }
 
+            _activePort.value = 0
+            _lastError.value = null
             _status.value = EngineStatus.STOPPED
             releaseWakeLock()
             stopForegroundCompat()
