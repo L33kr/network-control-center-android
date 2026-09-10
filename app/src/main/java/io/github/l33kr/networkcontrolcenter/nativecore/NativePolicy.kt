@@ -27,7 +27,15 @@ data class NativePolicyDecision(
 
 /**
  * Resolves the existing v2 profile/list model into actions owned by our engine.
- * The first enabled matching profile wins; an empty-domain profile is a catch-all.
+ *
+ * Important matching rule:
+ * - a profile with NO list references is a catch-all;
+ * - a profile that references one or more lists matches only domains contained
+ *   in those lists;
+ * - referenced-but-empty lists match nothing.
+ *
+ * The last rule is essential for optional PASS/ignore lists: an empty ignore
+ * list must never turn into a global PASS rule.
  */
 class NativePolicyResolver(private val context: Context) {
     fun resolve(host: String?, transport: NativeTransport): NativePolicyDecision {
@@ -36,9 +44,20 @@ class NativePolicyResolver(private val context: Context) {
 
         for (profile in set.profiles) {
             if (!profile.enabled || !protocolMatches(profile.protocol, transport)) continue
+
+            val hasDomainSelectors = profile.domainListIds.isNotEmpty()
             val domains = ProfileStore.resolveDomains(context, profile.domainListIds)
-            val match = if (domains.isEmpty()) null else domains.firstOrNull { domainMatches(normalizedHost, it) }
-            if (domains.isNotEmpty() && match == null) continue
+
+            val match = if (hasDomainSelectors) {
+                // A referenced but empty list is intentionally inert. It is NOT
+                // a catch-all. This prevents an empty PASS list from bypassing
+                // every connection before real BYPASS profiles are evaluated.
+                if (domains.isEmpty()) continue
+                domains.firstOrNull { domainMatches(normalizedHost, it) } ?: continue
+            } else {
+                // Only a profile with no list references at all is catch-all.
+                null
+            }
 
             if (profile.action == ProfileAction.PASS) {
                 return NativePolicyDecision(
