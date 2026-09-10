@@ -1,171 +1,138 @@
 package io.github.l33kr.networkcontrolcenter.byedpi
 
 /**
- * Deterministic strategy generator for current ByeDPI primitives.
+ * Android/Linux-oriented ByeDPI strategy families.
  *
- * This is intentionally not a random argv fuzzer. Every generated command is
- * assembled from syntax already supported by the pinned ByeDPI core. The quick
- * set varies one or two dimensions at a time so the tester can discover which
- * desync family works on a specific ISP without creating thousands of cases.
+ * These variants intentionally stay close to ByeDPI's own primitives and Linux
+ * recommendations instead of synthesizing Windows/zapret-style chains. In
+ * particular, disorder is centered around -d1 and OOB positions are explored
+ * relative to the SNI marker (+s), which is where ByeDPI's documentation suggests
+ * placing the out-of-band byte.
  */
 object ByeDpiStrategyGenerator {
     fun quick(): List<CatalogStrategy> = buildList {
         var index = 20_000
 
-        fun add(
-            family: String,
-            label: String,
-            command: String,
-            description: String,
-        ) {
+        fun add(label: String, command: String, description: String) {
             add(
                 CatalogStrategy(
                     index = index++,
-                    id = "gen-${stableId(command)}",
-                    name = "Generator · $label",
+                    id = "android-${stableId(command)}",
+                    name = "Android · $label",
                     command = command,
-                    category = "Generator",
+                    category = "Android",
                     description = description,
-                    source = "DPI Control Strategy Lab",
+                    source = "ByeDPI Linux/Android",
                     recommended = true,
                     protocol = "TCP/TLS",
                 ),
             )
         }
 
-        // OOB family: cheap and often enough for simple DPI implementations.
-        listOf(
-            "1" to "-Kt,h -o1 -a1",
-            "2" to "-Kt,h -o2 -a1",
-            "3" to "-Kt,h -o3 -a1",
-            "5+s" to "-Kt,h -o5+s -a1",
-        ).forEach { (position, command) ->
-            add("OOB", "OOB $position", command, "OOB с позицией $position")
-        }
+        // Exact raw default used by ByeByeDPI command mode. Keep it as a control
+        // candidate: if this works in ByeByeDPI but fails here, the problem is not
+        // strategy generation.
+        add(
+            "ByeBye raw default",
+            "-o1 -a1 -r-5+se",
+            "Контрольная команда ByeByeDPI: OOB + UDP fake + TLS record split.",
+        )
 
-        // Single split variants. Symbolic offsets (+s/+sm) are preferable to
-        // absolute ClientHello sizes because they adapt to different hosts.
-        listOf(
-            "1+s" to "-Kt,h -s1+s -a1",
-            "2+s" to "-Kt,h -s2+s -a1",
-            "3+s" to "-Kt,h -s3+s -a1",
-            "5+s" to "-Kt,h -s5+s -a1",
-            "1:3+sm" to "-Kt,h -s1:3+sm -a1",
-            "3:7+sm" to "-Kt,h -s3:7+sm -a1",
-        ).forEach { (position, command) ->
-            add("Split", "Split $position", command, "Разбиение TLS ClientHello: $position")
-        }
+        // OOB family. +s addresses positions relative to the SNI extension.
+        add("OOB 1", "-Kt,h -o1", "Минимальный OOB, близкий к UI-дефолту ByeByeDPI.")
+        add("OOB SNI +1", "-Kt,h -o1+s", "OOB внутри области SNI, смещение +1.")
+        add("OOB SNI +3", "-Kt,h -o3+s", "OOB внутри SNI; основной Android-кандидат.")
+        add("OOB SNI +5", "-Kt,h -o5+s", "Более глубокое OOB-смещение внутри SNI.")
+        add("DISOOB SNI +3", "-Kt,h -q3+s", "Disorder + OOB на позиции, привязанной к SNI.")
 
-        // Disorder + split explores packet ordering independently from fake data.
-        listOf(
-            "-Kt,h -d1 -s1+s -a1",
-            "-Kt,h -d1 -s3+s -a1",
-            "-Kt,h -d3+s -s1+s -a1",
-            "-Kt,h -d3+s -s5+s -a1",
-            "-Kt,h -d1:3+sm -s3:7+sm -a1",
-        ).forEachIndexed { n, command ->
-            add("Disorder", "Disorder/Split ${n + 1}", command, "Изменение порядка + split")
-        }
+        // Linux-native disorder. ByeDPI documentation specifically recommends
+        // disorder=1 on Linux, so do not start with the Windows 3+s pattern.
+        add("Linux disorder", "-Kt,h -d1", "Базовый disorder для Linux/Android.")
+        add("Linux disorder + split", "-Kt,h -s3+s -d1", "Split внутри SNI + Linux disorder=1.")
+        add("Linux disorder + TLS record", "-Kt,h -d1 -r1+s", "Linux disorder и отдельная граница TLS record.")
 
-        // OOB + split changes two independent properties but keeps the chain small.
-        listOf(
-            "-Kt,h -o1 -s1+s -a1",
-            "-Kt,h -o1 -s3+s -a1",
-            "-Kt,h -o2 -s1+s -a1",
-            "-Kt,h -o2 -s5+s -a1",
-        ).forEachIndexed { n, command ->
-            add("Hybrid", "OOB/Split ${n + 1}", command, "OOB + TLS split")
-        }
+        // TLS record splitting works at the TLS framing layer instead of relying
+        // only on TCP segmentation.
+        add("TLS record SNI +1", "-Kt,h -r1+s", "TLS record split относительно начала SNI.")
+        add("TLS record SNI end-5", "-Kt,h -r-5+se", "TLS record split относительно конца SNI.")
+        add("OOB SNI + TLS record", "-Kt,h -o3+s -r1+s", "OOB внутри SNI + TLS record split.")
+        add("OOB SNI + record end", "-Kt,h -o3+s -r-5+se", "OOB внутри SNI + split у конца SNI.")
 
-        // TLS record splitting targets DPI implementations that parse records
-        // differently from the TCP stream.
-        listOf(
-            "-Kt,h -r1+s -a1",
-            "-Kt,h -r3+s -a1",
-            "-Kt,h -r-5+se -a1",
-            "-Kt,h -o1 -r-5+se -a1",
-        ).forEachIndexed { n, command ->
-            add("TLS record", "TLS record ${n + 1}", command, "Изменение границ TLS record")
-        }
-
-        // Fake TTL explores a small safe range rather than brute-forcing TTL 1..255.
-        listOf(4, 6, 8, 12).forEach { ttl ->
+        // Fake packets on Android cannot assume TCP_MD5SIG is available, so use a
+        // small TTL family and let the real HTTP tester decide whether the fake is
+        // useful on this carrier.
+        listOf(4, 6, 8).forEach { ttl ->
             add(
-                "Fake",
-                "Fake TTL $ttl",
-                "-Kt,h -f-1 -t$ttl -s1+s -d3+s -a1",
-                "Fake packet TTL=$ttl + split/disorder",
-            )
-        }
-
-        // Fake SNI uses the SNI configured in the app and varies TTL. Keeping the
-        // placeholder in the generated command lets the normal config layer inject it.
-        listOf(4, 6, 8, 12).forEach { ttl ->
-            add(
-                "Fake SNI",
                 "Fake SNI TTL $ttl",
-                "-Kt,h -n {sni} -Qr -f-1 -t$ttl -s1+s -a1",
-                "Fake ClientHello/SNI, TTL=$ttl",
+                "-Kt,h -n {sni} -Qr -f-1 -t$ttl",
+                "Fake ClientHello/SNI с TTL=$ttl без зависимости от MD5SIG.",
             )
         }
+        add(
+            "Fake SNI + Linux disorder",
+            "-Kt,h -n {sni} -Qr -f-1 -t6 -d1",
+            "Fake SNI TTL=6 + Linux disorder=1.",
+        )
+        add(
+            "Fake + OOB SNI",
+            "-Kt,h -n {sni} -Qr -f-1 -t6 -o3+s",
+            "Fake SNI TTL=6 + OOB внутри настоящего SNI.",
+        )
 
-        // A few deeper combinations are kept in the quick set because they vary
-        // the shape significantly without exploding the search space.
-        listOf(
-            "-Kt,h -n {sni} -Qr -f-1 -t6 -d1 -s1+s -s5+s -a1",
-            "-Kt,h -n {sni} -Qr -f-1 -t8 -d3+s -s1+s -s6+s -a1",
-            "-Kt,h -o1 -r1+s -d1 -s3+s -a1",
-            "-Kt,h -o2 -r-5+se -s1:3+sm -a1",
-        ).forEachIndexed { n, command ->
-            add("Deep", "Deep ${n + 1}", command, "Комбинированный fallback ${n + 1}")
-        }
+        // Keep a plain SNI-relative split as a low-complexity control.
+        add("Split SNI +1", "-Kt,h -s1+s", "Один TCP split относительно начала SNI.")
+        add("Split SNI +3", "-Kt,h -s3+s", "Один TCP split глубже внутри SNI.")
     }.distinctBy { it.command }
 
     /**
-     * Larger deterministic pool for a future/explicit deep scan. It extends the
-     * quick set by mutating split/disorder positions around the most useful
-     * families, still avoiding a full Cartesian product.
+     * Optional larger pool. It varies only parameters that are meaningful for the
+     * same Android/Linux families, avoiding an uncontrolled Cartesian product.
      */
     fun deep(): List<CatalogStrategy> {
         val output = quick().toMutableList()
         var index = 30_000
 
-        val splits = listOf("1+s", "2+s", "3+s", "5+s", "1:3+sm", "3:7+sm")
-        val disorders = listOf("1", "1+s", "3+s", "5+s")
-        val ttls = listOf(4, 6, 8, 10, 12)
-
-        fun add(label: String, command: String) {
+        fun add(label: String, command: String, description: String) {
             if (output.any { it.command == command }) return
             output += CatalogStrategy(
                 index = index++,
-                id = "gen-${stableId(command)}",
-                name = "Generator · $label",
+                id = "android-${stableId(command)}",
+                name = "Android · $label",
                 command = command,
-                category = "Generator",
-                description = "Глубокая сгенерированная комбинация ByeDPI",
-                source = "DPI Control Strategy Lab",
+                category = "Android",
+                description = description,
+                source = "ByeDPI Linux/Android deep scan",
                 recommended = false,
                 protocol = "TCP/TLS",
             )
         }
 
-        // Pair nearby split/disorder values instead of every possible pair.
-        splits.forEachIndexed { i, split ->
-            val disorder = disorders[i % disorders.size]
-            add("D$disorder + S$split", "-Kt,h -d$disorder -s$split -a1")
-            add("OOB + S$split", "-Kt,h -o${if (i % 2 == 0) 1 else 2} -s$split -a1")
+        listOf(1, 2, 3, 4, 5, 7).forEach { offset ->
+            add("OOB SNI +$offset", "-Kt,h -o$offset+s", "OOB SNI offset +$offset")
+            add("DISOOB SNI +$offset", "-Kt,h -q$offset+s", "DISOOB SNI offset +$offset")
+            add("Split SNI +$offset", "-Kt,h -s$offset+s", "Split SNI offset +$offset")
         }
 
-        ttls.forEachIndexed { i, ttl ->
-            val split = splits[i % splits.size]
-            val disorder = disorders[(i + 1) % disorders.size]
-            add("Fake $ttl / S$split", "-Kt,h -f-1 -t$ttl -s$split -d$disorder -a1")
-            add("Fake SNI $ttl / S$split", "-Kt,h -n {sni} -Qr -f-1 -t$ttl -s$split -a1")
+        listOf(1, 2, 3, 5).forEach { offset ->
+            add("TLS record +$offset", "-Kt,h -r$offset+s", "TLS record split at SNI +$offset")
+            add("OOB + record +$offset", "-Kt,h -o3+s -r$offset+s", "OOB SNI + TLS record +$offset")
         }
 
-        listOf("1+s", "3+s", "-5+se").forEachIndexed { i, rec ->
-            val split = splits[(i + 2) % splits.size]
-            add("TLSrec $rec / S$split", "-Kt,h -r$rec -s$split -a1")
+        listOf(3, 4, 5, 6, 7, 8, 10, 12).forEach { ttl ->
+            add(
+                "Fake SNI TTL $ttl",
+                "-Kt,h -n {sni} -Qr -f-1 -t$ttl",
+                "Fake SNI with TTL=$ttl",
+            )
+            add(
+                "Fake SNI TTL $ttl + d1",
+                "-Kt,h -n {sni} -Qr -f-1 -t$ttl -d1",
+                "Fake SNI TTL=$ttl + Linux disorder=1",
+            )
+        }
+
+        listOf("1+s", "3+s", "-3+se", "-5+se", "-7+se").forEach { record ->
+            add("TLS record $record", "-Kt,h -r$record", "TLS record boundary $record")
         }
 
         return output.distinctBy { it.command }
