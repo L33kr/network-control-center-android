@@ -54,16 +54,22 @@ object ByeDpiRuntimeStore {
         .orEmpty()
         .ifBlank { ByeDpiStrategies.BALANCED.command }
 
-    /**
-     * Native mode deliberately skips ProfileCompiler. For TCP/TLS strategies we
-     * can append the same separate UDP group used by ByeByeDPI UI so QUIC is not
-     * silently left untreated. If the raw command already defines a UDP group,
-     * it is preserved exactly.
-     */
     fun nativeCommand(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val raw = nativeRawCommand(context).trim()
-        if (!prefs.getBoolean(KEY_NATIVE_UDP, true) || hasUdpGroup(raw)) return raw
+        return prepareNativeCommand(
+            command = nativeRawCommand(context),
+            addUdpFallback = prefs.getBoolean(KEY_NATIVE_UDP, true),
+        )
+    }
+
+    /**
+     * Prepare a direct ByeDPI command without ProfileCompiler. When requested,
+     * append the same independent UDP/QUIC group used by ByeByeDPI UI unless the
+     * command already contains an explicit UDP group.
+     */
+    fun prepareNativeCommand(command: String, addUdpFallback: Boolean = true): String {
+        val raw = command.trim().ifBlank { ByeDpiStrategies.BALANCED.command }
+        if (!addUdpFallback || hasUdpGroup(raw)) return raw
 
         return if (raw.endsWith("-An")) {
             "$raw -Ku -a1 -An"
