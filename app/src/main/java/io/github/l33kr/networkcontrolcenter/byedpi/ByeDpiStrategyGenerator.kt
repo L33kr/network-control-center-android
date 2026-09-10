@@ -1,142 +1,256 @@
 package io.github.l33kr.networkcontrolcenter.byedpi
 
 /**
- * Android/Linux-oriented ByeDPI strategy families.
+ * Seed-based strategy evolution for Android/ByeDPI.
  *
- * These variants intentionally stay close to ByeDPI's own primitives and Linux
- * recommendations instead of synthesizing Windows/zapret-style chains. In
- * particular, disorder is centered around -d1 and OOB positions are explored
- * relative to the SNI marker (+s), which is where ByeDPI's documentation suggests
- * placing the out-of-band byte.
+ * The previous generator invented short combinations from individual primitives.
+ * This version starts from commands that are actually present in ByeByeDPI's
+ * proxytest_strategies.list (plus its exact default command) and changes only one
+ * dimension at a time. This keeps the search explainable and much closer to the
+ * configurations that ByeDPI users really test in practice.
+ *
+ * Android note: the quick seed set deliberately avoids -S/--md5sig and -Y because
+ * availability/behaviour of those Linux socket features varies across Android
+ * kernels. They can still be entered manually or tested from the raw legacy list.
  */
 object ByeDpiStrategyGenerator {
-    fun quick(): List<CatalogStrategy> = buildList {
-        var index = 20_000
+    private data class Seed(
+        val name: String,
+        val command: String,
+        val description: String,
+    )
 
-        fun add(label: String, command: String, description: String) {
-            add(
-                CatalogStrategy(
-                    index = index++,
-                    id = "android-${stableId(command)}",
-                    name = "Android · $label",
-                    command = command,
-                    category = "Android",
-                    description = description,
-                    source = "ByeDPI Linux/Android",
-                    recommended = true,
-                    protocol = "TCP/TLS",
-                ),
-            )
-        }
-
-        // Exact raw default used by ByeByeDPI command mode. Keep it as a control
-        // candidate: if this works in ByeByeDPI but fails here, the problem is not
-        // strategy generation.
-        add(
-            "ByeBye raw default",
+    private val seeds = listOf(
+        Seed(
+            "ByeBye default",
             "-o1 -a1 -r-5+se",
-            "Контрольная команда ByeByeDPI: OOB + UDP fake + TLS record split.",
-        )
-
-        // OOB family. +s addresses positions relative to the SNI extension.
-        add("OOB 1", "-Kt,h -o1", "Минимальный OOB, близкий к UI-дефолту ByeByeDPI.")
-        add("OOB SNI +1", "-Kt,h -o1+s", "OOB внутри области SNI, смещение +1.")
-        add("OOB SNI +3", "-Kt,h -o3+s", "OOB внутри SNI; основной Android-кандидат.")
-        add("OOB SNI +5", "-Kt,h -o5+s", "Более глубокое OOB-смещение внутри SNI.")
-        add("DISOOB SNI +3", "-Kt,h -q3+s", "Disorder + OOB на позиции, привязанной к SNI.")
-
-        // Linux-native disorder. ByeDPI documentation specifically recommends
-        // disorder=1 on Linux, so do not start with the Windows 3+s pattern.
-        add("Linux disorder", "-Kt,h -d1", "Базовый disorder для Linux/Android.")
-        add("Linux disorder + split", "-Kt,h -s3+s -d1", "Split внутри SNI + Linux disorder=1.")
-        add("Linux disorder + TLS record", "-Kt,h -d1 -r1+s", "Linux disorder и отдельная граница TLS record.")
-
-        // TLS record splitting works at the TLS framing layer instead of relying
-        // only on TCP segmentation.
-        add("TLS record SNI +1", "-Kt,h -r1+s", "TLS record split относительно начала SNI.")
-        add("TLS record SNI end-5", "-Kt,h -r-5+se", "TLS record split относительно конца SNI.")
-        add("OOB SNI + TLS record", "-Kt,h -o3+s -r1+s", "OOB внутри SNI + TLS record split.")
-        add("OOB SNI + record end", "-Kt,h -o3+s -r-5+se", "OOB внутри SNI + split у конца SNI.")
-
-        // Fake packets on Android cannot assume TCP_MD5SIG is available, so use a
-        // small TTL family and let the real HTTP tester decide whether the fake is
-        // useful on this carrier.
-        listOf(4, 6, 8).forEach { ttl ->
-            add(
-                "Fake SNI TTL $ttl",
-                "-Kt,h -n {sni} -Qr -f-1 -t$ttl",
-                "Fake ClientHello/SNI с TTL=$ttl без зависимости от MD5SIG.",
-            )
-        }
-        add(
+            "Точная команда по умолчанию ByeByeDPI. Контрольная точка для сравнения приложений.",
+        ),
+        Seed(
+            "OOB + TLS record",
+            "-o1 -r-5+se -a1",
+            "Реальный seed из proxytest_strategies.list: OOB + TLS record split.",
+        ),
+        Seed(
+            "Linux disorder + split",
+            "-d1 -s3+s -a1",
+            "Реальный seed: disorder=1 с разбиением внутри SNI.",
+        ),
+        Seed(
+            "OOB/SNI disorder",
+            "-o1+s -d3+s -a1",
+            "Реальный seed: OOB и disorder относительно SNI.",
+        ),
+        Seed(
+            "Fake SNI + TLS record",
+            "-n {sni} -Qr -f-1 -r1+s -a1",
+            "Реальный seed: fake ClientHello/SNI и отдельная TLS-record граница.",
+        ),
+        Seed(
+            "Fake SNI + disorder range",
+            "-n {sni} -Qr -d1:3 -f-1 -a1",
+            "Реальный seed: fake SNI и диапазон disorder.",
+        ),
+        Seed(
+            "Fake TTL + SNI split",
+            "-f-1 -t8 -n {sni} -s1+s -a1",
+            "Реальный seed: fake TTL=8 и split в SNI.",
+        ),
+        Seed(
             "Fake SNI + Linux disorder",
-            "-Kt,h -n {sni} -Qr -f-1 -t6 -d1",
-            "Fake SNI TTL=6 + Linux disorder=1.",
-        )
-        add(
-            "Fake + OOB SNI",
-            "-Kt,h -n {sni} -Qr -f-1 -t6 -o3+s",
-            "Fake SNI TTL=6 + OOB внутри настоящего SNI.",
-        )
-
-        // Keep a plain SNI-relative split as a low-complexity control.
-        add("Split SNI +1", "-Kt,h -s1+s", "Один TCP split относительно начала SNI.")
-        add("Split SNI +3", "-Kt,h -s3+s", "Один TCP split глубже внутри SNI.")
-    }.distinctBy { it.command }
+            "-n {sni} -Qr -d1 -f-1 -a1",
+            "Реальный seed, особенно интересный для Linux/Android: disorder=1 + fake.",
+        ),
+        Seed(
+            "OOB + fake + record",
+            "-o1 -f-1 -r-5+se -a1",
+            "Реальный seed: OOB, fake и TLS-record split.",
+        ),
+        Seed(
+            "Disorder + split + fake TTL",
+            "-d1 -s1+s -r1+s -f-1 -t8 -a1",
+            "Реальный многокомпонентный seed без MD5SIG.",
+        ),
+        Seed(
+            "Fake SNI/OOB chain",
+            "-f-1 -n {sni} -Qr -s2+s -r3 -o20 -t4 -a1",
+            "Реальный seed: fake SNI + split + TLS record + OOB + TTL.",
+        ),
+        Seed(
+            "Fake SNI/disorder/OOB",
+            "-n {sni} -Qr -d5+sm -f3+sm -o2 -t4 -a1",
+            "Реальный seed с SNI-relative позициями и TTL=4.",
+        ),
+        Seed(
+            "Multi split/disorder/OOB",
+            "-f-1 -Qr -s1+sm -d3+s -s5+sm -o2 -a1 -As -r1+s -d8+s -a1",
+            "Реальный двухгрупповой seed из тестового набора ByeByeDPI.",
+        ),
+        Seed(
+            "Auto fallback chain",
+            "-o1 -a1 -At,r,s -f-1 -a1 -Ar,s -o1 -a1 -At -r1+s -f-1 -t6 -a1",
+            "Реальный seed с несколькими auto-trigger fallback группами.",
+        ),
+    )
 
     /**
-     * Optional larger pool. It varies only parameters that are meaningful for the
-     * same Android/Linux families, avoiding an uncontrolled Cartesian product.
+     * Fast pool: exact seeds first, then at most a small number of one-parameter
+     * descendants. The exact seeds are never rewritten or wrapped here.
+     */
+    fun quick(): List<CatalogStrategy> {
+        val output = mutableListOf<CatalogStrategy>()
+        var index = 20_000
+
+        seeds.forEachIndexed { seedIndex, seed ->
+            output += strategy(
+                index = index++,
+                idPrefix = "seed",
+                name = "ByeDPI seed ${seedIndex + 1} · ${seed.name}",
+                command = seed.command,
+                description = seed.description,
+                source = if (seedIndex == 0) "ByeByeDPI default" else "ByeByeDPI proxytest seed",
+                recommended = true,
+            )
+        }
+
+        // Mutate only one token family at a time. Two descendants per seed keeps
+        // the phone-side quick scan bounded while still exploring nearby behaviour.
+        seeds.forEachIndexed { seedIndex, seed ->
+            mutations(seed.command)
+                .take(2)
+                .forEach { mutation ->
+                    output += strategy(
+                        index = index++,
+                        idPrefix = "evo",
+                        name = "Seed ${seedIndex + 1} → ${mutation.first}",
+                        command = mutation.second,
+                        description = "Одна мутация реальной стратегии «${seed.name}»: ${mutation.first}.",
+                        source = "ByeByeDPI seed → ByeDPI Android",
+                        recommended = true,
+                    )
+                }
+        }
+
+        return output.distinctBy { it.command }.take(36)
+    }
+
+    /**
+     * Deep pool explores every one-dimensional mutation for every seed. It still
+     * avoids a Cartesian product: no mutation is built on top of another mutation.
      */
     fun deep(): List<CatalogStrategy> {
         val output = quick().toMutableList()
         var index = 30_000
 
-        fun add(label: String, command: String, description: String) {
-            if (output.any { it.command == command }) return
-            output += CatalogStrategy(
-                index = index++,
-                id = "android-${stableId(command)}",
-                name = "Android · $label",
-                command = command,
-                category = "Android",
-                description = description,
-                source = "ByeDPI Linux/Android deep scan",
-                recommended = false,
-                protocol = "TCP/TLS",
-            )
-        }
-
-        listOf(1, 2, 3, 4, 5, 7).forEach { offset ->
-            add("OOB SNI +$offset", "-Kt,h -o$offset+s", "OOB SNI offset +$offset")
-            add("DISOOB SNI +$offset", "-Kt,h -q$offset+s", "DISOOB SNI offset +$offset")
-            add("Split SNI +$offset", "-Kt,h -s$offset+s", "Split SNI offset +$offset")
-        }
-
-        listOf(1, 2, 3, 5).forEach { offset ->
-            add("TLS record +$offset", "-Kt,h -r$offset+s", "TLS record split at SNI +$offset")
-            add("OOB + record +$offset", "-Kt,h -o3+s -r$offset+s", "OOB SNI + TLS record +$offset")
-        }
-
-        listOf(3, 4, 5, 6, 7, 8, 10, 12).forEach { ttl ->
-            add(
-                "Fake SNI TTL $ttl",
-                "-Kt,h -n {sni} -Qr -f-1 -t$ttl",
-                "Fake SNI with TTL=$ttl",
-            )
-            add(
-                "Fake SNI TTL $ttl + d1",
-                "-Kt,h -n {sni} -Qr -f-1 -t$ttl -d1",
-                "Fake SNI TTL=$ttl + Linux disorder=1",
-            )
-        }
-
-        listOf("1+s", "3+s", "-3+se", "-5+se", "-7+se").forEach { record ->
-            add("TLS record $record", "-Kt,h -r$record", "TLS record boundary $record")
+        seeds.forEachIndexed { seedIndex, seed ->
+            mutations(seed.command).forEach { mutation ->
+                val command = mutation.second
+                if (output.any { it.command == command }) return@forEach
+                output += strategy(
+                    index = index++,
+                    idPrefix = "deep",
+                    name = "Seed ${seedIndex + 1} → ${mutation.first}",
+                    command = command,
+                    description = "Глубокий поиск: одна контролируемая мутация seed «${seed.name}».",
+                    source = "ByeByeDPI seed evolution",
+                    recommended = false,
+                )
+            }
         }
 
         return output.distinctBy { it.command }
     }
+
+    private fun mutations(command: String): List<Pair<String, String>> {
+        val tokens = shellSplit(command)
+        if (tokens.isEmpty()) return emptyList()
+        val output = mutableListOf<Pair<String, String>>()
+
+        fun mutateFirst(
+            labelPrefix: String,
+            predicate: (String) -> Boolean,
+            replacements: List<String>,
+        ) {
+            val position = tokens.indexOfFirst(predicate)
+            if (position < 0) return
+            val current = tokens[position]
+            replacements
+                .filter { it != current }
+                .forEach { replacement ->
+                    val next = tokens.toMutableList()
+                    next[position] = replacement
+                    output += "$labelPrefix ${replacement.removePrefix("-")}" to next.joinToString(" ")
+                }
+        }
+
+        // TTL only matters when a fake packet exists. Keep a narrow Android range.
+        if (tokens.any { it == "-f-1" || it.startsWith("-f") }) {
+            mutateFirst(
+                labelPrefix = "TTL",
+                predicate = { it.matches(Regex("-t\\d+")) },
+                replacements = listOf("-t4", "-t6", "-t8", "-t10", "-t12"),
+            )
+        }
+
+        // Move a simple OOB point but preserve the rest of the seed verbatim.
+        mutateFirst(
+            labelPrefix = "OOB",
+            predicate = { it.matches(Regex("-o\\d+(\\+s)?")) },
+            replacements = listOf("-o1", "-o2", "-o3", "-o1+s", "-o3+s"),
+        )
+
+        // Explore TLS-record boundaries around SNI/end-SNI.
+        mutateFirst(
+            labelPrefix = "TLSrec",
+            predicate = { it.startsWith("-r") && it.length > 2 },
+            replacements = listOf("-r1+s", "-r3+s", "-r-3+se", "-r-5+se", "-r-7+se"),
+        )
+
+        // Change one split point, favouring SNI-relative offsets.
+        mutateFirst(
+            labelPrefix = "Split",
+            predicate = { it.startsWith("-s") && it.length > 2 },
+            replacements = listOf("-s1+s", "-s2+s", "-s3+s", "-s5+s", "-s1+sm", "-s3+sm"),
+        )
+
+        // Linux/Android-specific disorder neighbourhood. Avoid Windows-only assumptions.
+        mutateFirst(
+            labelPrefix = "Disorder",
+            predicate = { it.startsWith("-d") && it.length > 2 },
+            replacements = listOf("-d1", "-d1+s", "-d3+s", "-d5+s"),
+        )
+
+        // Fake position itself is another meaningful single dimension.
+        mutateFirst(
+            labelPrefix = "Fake",
+            predicate = { it.startsWith("-f") && it.length > 2 },
+            replacements = listOf("-f-1", "-f1", "-f1+s", "-f3+sm"),
+        )
+
+        return output
+            .filter { it.second != command }
+            .distinctBy { it.second }
+    }
+
+    private fun strategy(
+        index: Int,
+        idPrefix: String,
+        name: String,
+        command: String,
+        description: String,
+        source: String,
+        recommended: Boolean,
+    ) = CatalogStrategy(
+        index = index,
+        id = "$idPrefix-${stableId(command)}",
+        name = name,
+        command = command,
+        category = "Android",
+        description = description,
+        source = source,
+        recommended = recommended,
+        protocol = "TCP/TLS",
+    )
 
     private fun stableId(command: String): String = command.hashCode().toUInt().toString(16)
 }
