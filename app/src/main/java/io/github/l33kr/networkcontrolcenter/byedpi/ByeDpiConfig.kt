@@ -16,6 +16,12 @@ enum class Ipv6Mode {
     ON,
 }
 
+enum class DomainFilterMode {
+    ALL,
+    ONLY_LISTED,
+    EXCLUDE_LISTED,
+}
+
 data class ByeDpiConfig(
     val bindIp: String = "127.0.0.1",
     val port: Int = 1080,
@@ -26,15 +32,86 @@ data class ByeDpiConfig(
     val sni: String = "google.com",
     val dns: String = "1.1.1.1",
     val ipv6Mode: Ipv6Mode = Ipv6Mode.AUTO,
+    val domainFilterMode: DomainFilterMode = DomainFilterMode.ALL,
+    val domains: String = "",
 ) {
+    fun normalizedDomains(): List<String> = domains
+        .lineSequence()
+        .flatMap { line -> line.split(' ', ',', ';').asSequence() }
+        .map { it.trim().lowercase().removePrefix("https://").removePrefix("http://").substringBefore('/') }
+        .map { it.removePrefix("*.").trim('.') }
+        .filter { it.isNotBlank() && it.length <= 253 && !it.contains('"') && !it.contains('\'') }
+        .distinct()
+        .toList()
+
     fun toArgs(commandOverride: String? = null): Array<String> = buildList {
         add("ciadpi")
         add("--ip")
         add(bindIp)
         add("--port")
         add(port.toString())
-        addAll(shellSplit((commandOverride ?: command).replace("{sni}", sni)))
+
+        val strategyArgs = shellSplit((commandOverride ?: command).replace("{sni}", sni))
+        addAll(applyDomainFilter(strategyArgs))
     }.toTypedArray()
+
+    private fun applyDomainFilter(strategyArgs: List<String>): List<String> {
+        val list = normalizedDomains()
+        if (domainFilterMode == DomainFilterMode.ALL || list.isEmpty()) return strategyArgs
+
+        val hostsArg = ":${list.joinToString(" ")}"
+
+        return when (domainFilterMode) {
+            DomainFilterMode.ALL -> strategyArgs
+
+            // Every desync group receives the host whitelist. This keeps a multi-stage
+            // strategy inside the selected domains even when it contains -A/--auto fallbacks.
+            DomainFilterMode.ONLY_LISTED -> injectHostsIntoEveryGroup(strategyArgs, hostsArg)
+
+            // First group is a no-op guard for excluded hosts. -An moves to the selected
+            // strategy only when that guard is skipped because the host is not excluded.
+            DomainFilterMode.EXCLUDE_LISTED -> buildList {
+                add("-H")
+                add(hostsArg)
+                add("-An")
+                addAll(strategyArgs)
+            }
+        }
+    }
+
+    private fun injectHostsIntoEveryGroup(args: List<String>, hostsArg: String): List<String> = buildList {
+        add("-H")
+        add(hostsArg)
+
+        var index = 0
+        while (index < args.size) {
+            val token = args[index]
+            add(token)
+
+            when {
+                token == "-A" || token == "--auto" -> {
+                    if (index + 1 < args.size) {
+                        index++
+                        add(args[index])
+                    }
+                    add("-H")
+                    add(hostsArg)
+                }
+
+                token.startsWith("-A") && token.length > 2 -> {
+                    add("-H")
+                    add(hostsArg)
+                }
+
+                token.startsWith("--auto=") -> {
+                    add("-H")
+                    add(hostsArg)
+                }
+            }
+
+            index++
+        }
+    }
 }
 
 object ByeDpiConfigStore {
@@ -60,6 +137,13 @@ object ByeDpiConfigStore {
                     prefs.getString("ipv6_mode", Ipv6Mode.AUTO.name) ?: Ipv6Mode.AUTO.name,
                 )
             }.getOrDefault(Ipv6Mode.AUTO),
+            domainFilterMode = runCatching {
+                DomainFilterMode.valueOf(
+                    prefs.getString("domain_filter_mode", DomainFilterMode.ALL.name)
+                        ?: DomainFilterMode.ALL.name,
+                )
+            }.getOrDefault(DomainFilterMode.ALL),
+            domains = prefs.getString("domains", "") ?: "",
         )
     }
 
@@ -74,6 +158,8 @@ object ByeDpiConfigStore {
             .putString("sni", config.sni)
             .putString("dns", config.dns)
             .putString("ipv6_mode", config.ipv6Mode.name)
+            .putString("domain_filter_mode", config.domainFilterMode.name)
+            .putString("domains", config.domains)
             .apply()
     }
 
@@ -94,9 +180,26 @@ object ByeDpiConfigStore {
         )
     }
 
+    fun setManualStrategy(context: Context, command: String, name: String = "Ручная стратегия") {
+        val current = load(context)
+        save(
+            context,
+            current.copy(
+                mode = ByeDpiMode.MANUAL,
+                command = command.trim().ifBlank { ByeDpiStrategies.BALANCED.command },
+                strategyName = name,
+            ),
+        )
+    }
+
     fun setSni(context: Context, sni: String) {
         val current = load(context)
         save(context, current.copy(sni = sni.trim().ifBlank { "google.com" }))
+    }
+
+    fun setDomainFilter(context: Context, mode: DomainFilterMode, domains: String) {
+        val current = load(context)
+        save(context, current.copy(domainFilterMode = mode, domains = domains))
     }
 }
 
