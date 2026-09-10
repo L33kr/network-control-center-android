@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feature/profile-engine-v2 ]
   pull_request:
   workflow_dispatch:
 
