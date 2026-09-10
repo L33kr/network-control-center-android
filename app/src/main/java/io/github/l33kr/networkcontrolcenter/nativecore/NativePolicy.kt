@@ -34,8 +34,11 @@ data class NativePolicyDecision(
  *   in those lists;
  * - referenced-but-empty lists match nothing.
  *
- * The last rule is essential for optional PASS/ignore lists: an empty ignore
- * list must never turn into a global PASS rule.
+ * For UDP/443 there is one deliberate alpha compatibility fallback: if the
+ * destination is known only as an IP (for example because the app used DoH/DoT)
+ * and the active set contains an enabled UDP/QUIC BYPASS profile, the flow is
+ * marked for bypass. NativeDpiProxy then suppresses that UDP/443 packet so the
+ * client can retry over TCP/TLS, where our stream transformations are available.
  */
 class NativePolicyResolver(private val context: Context) {
     fun resolve(host: String?, transport: NativeTransport): NativePolicyDecision {
@@ -49,13 +52,9 @@ class NativePolicyResolver(private val context: Context) {
             val domains = ProfileStore.resolveDomains(context, profile.domainListIds)
 
             val match = if (hasDomainSelectors) {
-                // A referenced but empty list is intentionally inert. It is NOT
-                // a catch-all. This prevents an empty PASS list from bypassing
-                // every connection before real BYPASS profiles are evaluated.
                 if (domains.isEmpty()) continue
                 domains.firstOrNull { domainMatches(normalizedHost, it) } ?: continue
             } else {
-                // Only a profile with no list references at all is catch-all.
                 null
             }
 
@@ -71,7 +70,6 @@ class NativePolicyResolver(private val context: Context) {
 
             val nativePreset = NativeStrategies.fromCommand(profile.strategyCommand)
             val technique = when (transport) {
-                // Dedicated QUIC manipulation is separate from TCP techniques.
                 NativeTransport.UDP -> NativeTechnique.PASS
                 NativeTransport.TCP -> nativePreset?.technique ?: NativeTechnique.HYBRID
             }
@@ -80,6 +78,29 @@ class NativePolicyResolver(private val context: Context) {
                 profileName = profile.name,
                 matchedDomain = match,
                 strategyTitle = nativePreset?.title ?: "Auto / Hybrid",
+                shouldBypass = true,
+            )
+        }
+
+        // Some modern apps resolve through DoH/DoT, so hev can hand the UDP relay
+        // only a numeric destination. In that case passive DNS correlation has no
+        // hostname to match. If the user explicitly has an enabled UDP/QUIC BYPASS
+        // profile, treat an unresolved UDP destination as a candidate for the
+        // QUIC->TCP compatibility fallback. NativeDpiProxy applies this decision
+        // only on destination port 443; ordinary UDP/DNS/voice traffic is untouched.
+        if (
+            transport == NativeTransport.UDP &&
+            normalizedHost == null &&
+            set.profiles.any { profile ->
+                profile.enabled &&
+                    profile.action == ProfileAction.BYPASS &&
+                    profile.protocol == ProfileProtocol.UDP_QUIC
+            }
+        ) {
+            return NativePolicyDecision(
+                technique = NativeTechnique.PASS,
+                profileName = "QUIC compatibility",
+                strategyTitle = "Force TCP for unresolved UDP/443",
                 shouldBypass = true,
             )
         }
