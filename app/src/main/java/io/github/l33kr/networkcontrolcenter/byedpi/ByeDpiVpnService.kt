@@ -17,6 +17,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import hev.htproxy.TProxyService
 import io.github.l33kr.networkcontrolcenter.MainActivity
+import io.github.l33kr.networkcontrolcenter.R
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -116,7 +117,7 @@ class ByeDpiVpnService : VpnService() {
                 hevConfig = configFile
 
                 val builder = Builder()
-                    .setSession("Network Control Center · ByeDPI")
+                    .setSession("DPI Control · ByeDPI")
                     .setConfigureIntent(
                         PendingIntent.getActivity(
                             this@ByeDpiVpnService,
@@ -136,8 +137,7 @@ class ByeDpiVpnService : VpnService() {
                 if (config.dns.isNotBlank()) builder.addDnsServer(config.dns)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
-                // The native ByeDPI proxy and TG WS live in this package. Keeping the
-                // package outside the TUN prevents VPN -> proxy -> VPN routing loops.
+                // Native local proxies must stay outside the TUN to avoid VPN loops.
                 builder.addDisallowedApplication(packageName)
 
                 val descriptor = builder.establish()
@@ -209,7 +209,7 @@ class ByeDpiVpnService : VpnService() {
               log-level: warn
         """.trimIndent()
 
-        return File.createTempFile("hev-ncc-", ".yml", cacheDir).apply {
+        return File.createTempFile("hev-dpi-control-", ".yml", cacheDir).apply {
             writeText(text)
         }
     }
@@ -245,8 +245,6 @@ class ByeDpiVpnService : VpnService() {
     private fun shouldRouteIpv6(mode: Ipv6Mode, network: NetworkSnapshot): Boolean = when (mode) {
         Ipv6Mode.ON -> true
         Ipv6Mode.OFF -> false
-        // Conservative default for mobile DPI: avoid an IPv6 path bypassing the
-        // IPv4 desync path. Wi-Fi keeps IPv6 when the active link actually has it.
         Ipv6Mode.AUTO -> network.hasIpv6 && !network.isCellular
     }
 
@@ -333,7 +331,7 @@ class ByeDpiVpnService : VpnService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "ByeDPI VPN",
+            "DPI Control · ByeDPI",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             description = "Локальная обработка трафика через ByeDPI"
@@ -359,8 +357,8 @@ class ByeDpiVpnService : VpnService() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setContentTitle("Network Control Center · ByeDPI")
+            .setSmallIcon(R.drawable.ic_stat_dpi)
+            .setContentTitle("DPI Control · ByeDPI")
             .setContentText(text)
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", stop)
