@@ -11,6 +11,7 @@ object NativeRuntime {
     private val modified = AtomicInteger(0)
     private val tls = AtomicInteger(0)
     private val udp = AtomicInteger(0)
+    private val quicFallback = AtomicInteger(0)
 
     private val _snapshot = MutableStateFlow(NativeRuntimeSnapshot())
     val snapshot: StateFlow<NativeRuntimeSnapshot> = _snapshot.asStateFlow()
@@ -21,6 +22,7 @@ object NativeRuntime {
         modified.set(0)
         tls.set(0)
         udp.set(0)
+        quicFallback.set(0)
         publish()
     }
 
@@ -50,6 +52,11 @@ object NativeRuntime {
         publish(lastHost = host)
     }
 
+    fun quicFallback(host: String?) {
+        quicFallback.incrementAndGet()
+        publish(lastHost = host, lastTechnique = "QUIC_TO_TCP")
+    }
+
     fun error(message: String) {
         publish(lastError = message)
     }
@@ -65,6 +72,7 @@ object NativeRuntime {
             transformedFlows = modified.get(),
             tlsFlows = tls.get(),
             udpPackets = udp.get(),
+            quicFallbacks = quicFallback.get(),
             lastHost = lastHost,
             lastTechnique = lastTechnique,
             lastError = lastError,
@@ -78,6 +86,7 @@ data class NativeRuntimeSnapshot(
     val transformedFlows: Int = 0,
     val tlsFlows: Int = 0,
     val udpPackets: Int = 0,
+    val quicFallbacks: Int = 0,
     val lastHost: String? = null,
     val lastTechnique: String? = null,
     val lastError: String? = null,
