@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -83,6 +82,7 @@ import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategies
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyCatalog
 import io.github.l33kr.networkcontrolcenter.byedpi.CatalogStrategy
 import io.github.l33kr.networkcontrolcenter.byedpi.Ipv6Mode
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.CompiledProfileSet
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.DomainListModel
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileAction
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileCompiler
@@ -282,11 +282,11 @@ private fun DpiControlV2App(
                         ),
                     )
                 },
-                onToggle = { id, enabled ->
+                onToggle = { id, isEnabled ->
                     saveActiveSet(
                         activeSet.copy(
                             profiles = activeSet.profiles.map { profile ->
-                                if (profile.id == id) profile.copy(enabled = enabled) else profile
+                                if (profile.id == id) profile.copy(enabled = isEnabled) else profile
                             },
                         ),
                     )
@@ -294,11 +294,13 @@ private fun DpiControlV2App(
                 onMove = { id, delta ->
                     val mutable = activeSet.profiles.toMutableList()
                     val from = mutable.indexOfFirst { it.id == id }
-                    val to = (from + delta).coerceIn(0, mutable.lastIndex)
-                    if (from >= 0 && from != to) {
-                        val item = mutable.removeAt(from)
-                        mutable.add(to, item)
-                        saveActiveSet(activeSet.copy(profiles = mutable))
+                    if (from >= 0) {
+                        val to = (from + delta).coerceIn(0, mutable.lastIndex)
+                        if (from != to) {
+                            val item = mutable.removeAt(from)
+                            mutable.add(to, item)
+                            saveActiveSet(activeSet.copy(profiles = mutable))
+                        }
                     }
                 },
             )
@@ -338,7 +340,7 @@ private fun HomeScreen(
     modifier: Modifier,
     state: EngineState,
     activeSet: ProfileSetModel,
-    compiled: io.github.l33kr.networkcontrolcenter.byedpi.profile.CompiledProfileSet,
+    compiled: CompiledProfileSet,
     config: ByeDpiConfig,
     activeRuntimeProfile: String?,
     network: String?,
@@ -388,7 +390,11 @@ private fun HomeScreen(
                 modifier = Modifier.padding(22.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
                     Surface(
                         shape = RoundedCornerShape(18.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -399,13 +405,9 @@ private fun HomeScreen(
                             modifier = Modifier.padding(14.dp),
                         )
                     }
-                    Spacer(Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(modifier = Modifier.fillMaxWidth(0.78f)) {
                         Text("Обход DPI", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text(
-                            statusLabel(state.byeDpi),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Text(statusLabel(state.byeDpi), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
 
@@ -414,10 +416,8 @@ private fun HomeScreen(
                 }
 
                 if (state.byeDpi == EngineStatus.RUNNING) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        InfoPill(activeRuntimeProfile ?: activeSet.name)
-                        network?.let { InfoPill(it) }
-                    }
+                    InfoPill(activeRuntimeProfile ?: activeSet.name)
+                    network?.let { InfoPill(it) }
                     Text(
                         if (ipv6) "Маршрут: IPv4 + IPv6" else "Маршрут: IPv4",
                         style = MaterialTheme.typography.bodySmall,
@@ -453,11 +453,7 @@ private fun HomeScreen(
             Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Text(activeSet.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Text(activeSet.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    InfoPill("${compiled.enabledProfiles} профилей")
-                    InfoPill("${compiled.bypassProfiles} bypass")
-                    InfoPill("${compiled.passProfiles} pass")
-                }
+                InfoPill("${compiled.enabledProfiles} профилей · ${compiled.bypassProfiles} bypass · ${compiled.passProfiles} pass")
             }
         }
 
@@ -473,13 +469,11 @@ private fun HomeScreen(
             )
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            FilledTonalButton(modifier = Modifier.weight(1f), onClick = onOpenProfiles) {
-                Text("Профили")
-            }
-            FilledTonalButton(modifier = Modifier.weight(1f), onClick = onOpenLists) {
-                Text("Списки")
-            }
+        FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onOpenProfiles) {
+            Text("Открыть профили")
+        }
+        FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onOpenLists) {
+            Text("Открыть доменные списки")
         }
         OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { showAdvanced = true }) {
             Icon(Icons.Rounded.Settings, contentDescription = null)
@@ -507,7 +501,7 @@ private fun SetsScreen(
     ) {
         SectionTitle("Наборы")
         Text(
-            "Набор определяет порядок профилей. Первый совпавший профиль решает, применять обход или пропустить трафик без desync.",
+            "Набор задаёт порядок правил. Более точные профили должны находиться выше общего PASS.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
@@ -523,26 +517,21 @@ private fun SetsScreen(
                 ),
             ) {
                 Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(set.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            Text(set.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(set.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         if (selected) Icon(Icons.Rounded.CheckCircle, contentDescription = "Активен")
                     }
-                    Text(
-                        "${set.profiles.count { it.enabled }} активных профилей",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+                    Text(set.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${set.profiles.count { it.enabled }} активных профилей", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
 
-        OutlinedButton(
-            modifier = Modifier.fillMaxWidth(),
-            enabled = enabled,
-            onClick = onDuplicate,
-        ) {
+        OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = enabled, onClick = onDuplicate) {
             Icon(Icons.Rounded.Add, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("Сделать редактируемую копию")
@@ -588,7 +577,7 @@ private fun ProfilesScreen(
     ) {
         SectionTitle("${set.name} · профили")
         Text(
-            "Порядок важен: сверху находятся более точные правила, внизу — общий PASS.",
+            "Первое совпавшее правило определяет обработку. Профили можно отключать и менять местами.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
@@ -599,15 +588,13 @@ private fun ProfilesScreen(
                 onClick = { if (enabled) editing = profile },
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "${index + 1}",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(profile.name, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth(0.73f)) {
+                            Text("${index + 1}. ${profile.name}", fontWeight = FontWeight.SemiBold)
                             Text(
                                 profileSummary(profile, lists),
                                 style = MaterialTheme.typography.bodySmall,
@@ -623,19 +610,25 @@ private fun ProfilesScreen(
                         )
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        InfoPill(if (profile.action == ProfileAction.PASS) "PASS" else "BYPASS")
-                        Spacer(Modifier.width(6.dp))
-                        InfoPill(protocolTitle(profile.protocol))
-                        Spacer(Modifier.weight(1f))
-                        IconButton(enabled = enabled && index > 0, onClick = { onMove(profile.id, -1) }) {
-                            Icon(Icons.Rounded.ArrowUpward, contentDescription = "Выше")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            InfoPill(if (profile.action == ProfileAction.PASS) "PASS" else "BYPASS")
+                            InfoPill(protocolTitle(profile.protocol))
                         }
-                        IconButton(enabled = enabled && index < set.profiles.lastIndex, onClick = { onMove(profile.id, 1) }) {
-                            Icon(Icons.Rounded.ArrowDownward, contentDescription = "Ниже")
-                        }
-                        IconButton(enabled = enabled, onClick = { editing = profile }) {
-                            Icon(Icons.Rounded.Edit, contentDescription = "Редактировать")
+                        Row {
+                            IconButton(enabled = enabled && index > 0, onClick = { onMove(profile.id, -1) }) {
+                                Icon(Icons.Rounded.ArrowUpward, contentDescription = "Выше")
+                            }
+                            IconButton(enabled = enabled && index < set.profiles.lastIndex, onClick = { onMove(profile.id, 1) }) {
+                                Icon(Icons.Rounded.ArrowDownward, contentDescription = "Ниже")
+                            }
+                            IconButton(enabled = enabled, onClick = { editing = profile }) {
+                                Icon(Icons.Rounded.Edit, contentDescription = "Редактировать")
+                            }
                         }
                     }
                 }
@@ -677,7 +670,7 @@ private fun ListsScreen(
     ) {
         SectionTitle("Доменные списки")
         Text(
-            "Один список можно подключить к нескольким профилям. Изменение списка автоматически меняет все использующие его правила.",
+            "Один список может использоваться несколькими профилями. Есть отдельный список PASS-исключений.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
@@ -689,10 +682,11 @@ private fun ListsScreen(
                 shape = RoundedCornerShape(20.dp),
             ) {
                 Row(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(modifier = Modifier.fillMaxWidth(0.8f)) {
                         Text(list.name, fontWeight = FontWeight.SemiBold)
                         Text(
                             "${list.domains.size} доменов",
@@ -741,7 +735,7 @@ private fun TelegramScreen(
                     if (status == EngineStatus.RUNNING && port > 0) {
                         "127.0.0.1:$port · MTProto → WSS"
                     } else {
-                        "Отдельный локальный Telegram-прокси. Может работать независимо от ByeDPI."
+                        "Отдельный локальный Telegram-прокси. Работает независимо от ByeDPI."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -836,18 +830,16 @@ private fun ProfileEditorDialog(
                 }
 
                 Text("Протокол", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    ProfileProtocol.entries.forEach { item ->
-                        FilterChip(
-                            selected = protocol == item,
-                            enabled = enabled,
-                            onClick = { protocolName = item.name },
-                            label = { Text(protocolTitle(item)) },
-                        )
-                    }
+                ProfileProtocol.entries.forEach { item ->
+                    FilterChip(
+                        selected = protocol == item,
+                        enabled = enabled,
+                        onClick = { protocolName = item.name },
+                        label = { Text(protocolTitle(item)) },
+                    )
                 }
 
-                Text("Списки", style = MaterialTheme.typography.labelLarge)
+                Text("Доменные списки", style = MaterialTheme.typography.labelLarge)
                 lists.forEach { list ->
                     FilterChip(
                         selected = list.id in selectedLists,
@@ -991,7 +983,7 @@ private fun DomainListEditorDialog(
                     onValueChange = { domains = it },
                     label = { Text("Домены") },
                     placeholder = { Text("youtube.com\ngooglevideo.com") },
-                    supportingText = { Text("Один домен на строку или через пробел/запятую") },
+                    supportingText = { Text("По одному на строку или через пробел/запятую") },
                     minLines = 10,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                 )
@@ -1080,34 +1072,28 @@ private fun AdvancedSettingsDialog(
 
 @Composable
 private fun RoutePreviewRow(index: Int, profile: TrafficProfile) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            index.toString().padStart(2, '0'),
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(profile.name, fontWeight = FontWeight.Medium)
-            Text(
-                if (profile.action == ProfileAction.PASS) "Без desync" else (profile.strategyName ?: "ByeDPI"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.fillMaxWidth(0.72f)) {
+                Text("${index.toString().padStart(2, '0')} · ${profile.name}", fontWeight = FontWeight.Medium)
+                Text(
+                    if (profile.action == ProfileAction.PASS) "Без desync" else (profile.strategyName ?: "ByeDPI"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            InfoPill(if (profile.action == ProfileAction.PASS) "PASS" else "BYPASS")
         }
-        InfoPill(if (profile.action == ProfileAction.PASS) "PASS" else "BYPASS")
     }
 }
 
 @Composable
 private fun InfoPill(text: String) {
-    Surface(
-        shape = RoundedCornerShape(100.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-    ) {
+    Surface(shape = RoundedCornerShape(100.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
         Text(
             text,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
