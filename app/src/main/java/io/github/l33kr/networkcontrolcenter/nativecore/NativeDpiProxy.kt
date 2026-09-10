@@ -31,36 +31,36 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * DPI Control's own rootless stream engine.
+ * DPI Control native stream engine.
  *
- * It speaks SOCKS5 to hev-socks5-tunnel, owns all TCP/UDP upstream sockets and
- * performs protocol-aware transformations itself. ByeDPI is not involved in
- * this code path.
+ * Alpha 4 deliberately runs in an aggressive diagnostic mode:
+ * - every TLS flow on TCP/443 is transformed regardless of domain lists;
+ * - every UDP/443 flow is suppressed so clients have to retry over TCP;
+ * - ClientHello is rewritten into several valid TLS records;
+ * - one TCP urgent/OOB byte is injected between early records when supported.
+ *
+ * This mode is intentionally broader than the final policy engine. It lets us
+ * distinguish an ineffective desync primitive from a domain-matching problem.
  */
 class NativeDpiProxy(private val context: Context) {
     private val running = AtomicBoolean(false)
     private val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val clients = ConcurrentHashMap.newKeySet<Socket>()
-    private val policy = NativePolicyResolver(context)
 
     @Volatile
     private var serverSocket: ServerSocket? = null
-
-    @Volatile
-    private var forceTcpForBypassDomains: Boolean = true
 
     fun start(bindIp: String, port: Int): Int {
         if (!running.compareAndSet(false, true)) return -2
         NativeRuntime.reset()
         NativeDnsCache.clear()
-        forceTcpForBypassDomains = NativeSettingsStore.load(context).forceTcpForBypassDomains
 
         return try {
             ServerSocket().use { server ->
                 server.reuseAddress = true
                 server.bind(InetSocketAddress(bindIp, port), 128)
                 serverSocket = server
-                Log.i(TAG, "Native SOCKS5 listening on $bindIp:$port")
+                Log.i(TAG, "Native alpha4 SOCKS5 listening on $bindIp:$port")
 
                 while (running.get()) {
                     val client = try {
@@ -141,8 +141,7 @@ class NativeDpiProxy(private val context: Context) {
         if (readU8(input) != SOCKS_VERSION) throw SocksException("Invalid request version")
         val command = readU8(input)
         readU8(input) // RSV
-        val target = readTarget(input)
-        return SocksRequest(command, target)
+        return SocksRequest(command, readTarget(input))
     }
 
     private suspend fun handleConnect(
@@ -151,18 +150,14 @@ class NativeDpiProxy(private val context: Context) {
         clientOutput: OutputStream,
         target: SocksTarget,
     ) {
-        val remote = Socket()
-        remote.tcpNoDelay = true
-        remote.keepAlive = true
+        val remote = Socket().apply {
+            tcpNoDelay = true
+            keepAlive = true
+        }
 
         try {
             remote.connect(target.socketAddress(), CONNECT_TIMEOUT_MS)
-            sendReply(
-                clientOutput,
-                REP_SUCCEEDED,
-                remote.localAddress,
-                remote.localPort,
-            )
+            sendReply(clientOutput, REP_SUCCEEDED, remote.localAddress, remote.localPort)
 
             val correlated = target.address?.let(NativeDnsCache::lookup)
             NativeRuntime.flowOpened(correlated ?: target.displayHost)
@@ -187,7 +182,7 @@ class NativeDpiProxy(private val context: Context) {
     ) = coroutineScope {
         val upstream = launch(Dispatchers.IO) {
             try {
-                relayClientToRemote(client, clientInput, remote.getOutputStream(), target)
+                relayClientToRemote(client, clientInput, remote, target)
             } finally {
                 runCatching { remote.shutdownOutput() }
             }
@@ -217,9 +212,10 @@ class NativeDpiProxy(private val context: Context) {
     private fun relayClientToRemote(
         client: Socket,
         input: InputStream,
-        remoteOutput: OutputStream,
+        remote: Socket,
         target: SocksTarget,
     ) {
+        val output = remote.getOutputStream()
         val initial = ByteArrayOutputStream(16 * 1024)
         val readBuffer = ByteArray(8 * 1024)
         var handled = false
@@ -244,7 +240,7 @@ class NativeDpiProxy(private val context: Context) {
                     TlsParseResult.NotTls -> {
                         val http = parseHttpHost(bytes)
                         if (http != null || !looksLikeHttp(bytes)) {
-                            applyInitialPayload(bytes, null, http, target, remoteOutput)
+                            applyInitialPayload(bytes, null, http, target, remote, output)
                             initial.reset()
                             handled = true
                         }
@@ -254,7 +250,7 @@ class NativeDpiProxy(private val context: Context) {
                             ?: target.address?.let(NativeDnsCache::lookup)
                             ?: target.displayHost
                         NativeRuntime.tlsSeen(displayHost)
-                        applyInitialPayload(bytes, parsed.info, null, target, remoteOutput)
+                        applyInitialPayload(bytes, parsed.info, null, target, remote, output)
                         initial.reset()
                         handled = true
                     }
@@ -266,11 +262,11 @@ class NativeDpiProxy(private val context: Context) {
 
         if (initial.size() > 0) {
             val bytes = initial.toByteArray()
-            applyInitialPayload(bytes, null, parseHttpHost(bytes), target, remoteOutput)
+            applyInitialPayload(bytes, null, parseHttpHost(bytes), target, remote, output)
         }
 
-        input.copyTo(remoteOutput, COPY_BUFFER_SIZE)
-        remoteOutput.flush()
+        input.copyTo(output, COPY_BUFFER_SIZE)
+        output.flush()
     }
 
     private fun applyInitialPayload(
@@ -278,47 +274,24 @@ class NativeDpiProxy(private val context: Context) {
         tls: TlsClientHelloInfo?,
         http: HttpHostInfo?,
         target: SocksTarget,
+        remote: Socket,
         output: OutputStream,
     ) {
         if (bytes.isEmpty()) return
 
-        val candidates = buildList {
-            tls?.sni?.let(::add)
-            http?.host?.let(::add)
-            target.host?.let(::add)
-            target.address?.let(NativeDnsCache::lookup)?.let(::add)
-        }.map { it.trim().lowercase() }.filter { it.isNotBlank() }.distinct()
-
-        var host = candidates.firstOrNull() ?: target.displayHost
-        var decision = policy.resolve(host, NativeTransport.TCP)
-        for (candidate in candidates) {
-            val candidateDecision = policy.resolve(candidate, NativeTransport.TCP)
-            if (candidateDecision.shouldBypass || candidateDecision.matchedDomain != null) {
-                host = candidate
-                decision = candidateDecision
-                break
-            }
-        }
-
-        if (decision.technique == NativeTechnique.PASS) {
-            output.write(bytes)
-            output.flush()
-            return
-        }
+        val host = tls?.sni
+            ?: http?.host
+            ?: target.address?.let(NativeDnsCache::lookup)
+            ?: target.displayHost
 
         when {
-            tls != null && tls.sniStart != null && tls.sniEndExclusive != null -> {
-                when (decision.technique) {
-                    NativeTechnique.TLS_RECORD_SPLIT -> writeTlsRecordSplit(output, bytes, tls, delayMs = 0)
-                    NativeTechnique.MULTI_SPLIT -> writeMultiSplit(output, bytes, tls.sniStart, tls.sniEndExclusive)
-                    NativeTechnique.HYBRID -> writeTlsRecordSplit(output, bytes, tls, delayMs = HYBRID_DELAY_MS)
-                    NativeTechnique.PASS -> Unit
-                }
-                NativeRuntime.transformed(host, decision.technique)
+            tls != null && target.port == HTTPS_PORT -> {
+                writeAggressiveTls(remote, output, bytes, tls)
+                NativeRuntime.transformed(host, "ALPHA4_TLS_FRAGMENT_OOB")
             }
             http != null -> {
-                writeMultiSplit(output, bytes, http.hostStart, http.hostEndExclusive)
-                NativeRuntime.transformed(host, NativeTechnique.MULTI_SPLIT)
+                writeHttpMultiSplit(output, bytes, http)
+                NativeRuntime.transformed(host, "ALPHA4_HTTP_SPLIT")
             }
             else -> {
                 output.write(bytes)
@@ -328,68 +301,100 @@ class NativeDpiProxy(private val context: Context) {
     }
 
     /**
-     * Re-encodes one TLS handshake record into two valid records, splitting in
-     * the middle of SNI. The handshake length itself is unchanged and therefore
-     * remains a protocol-valid ClientHello spanning two TLS records.
+     * Splits one ClientHello TLS record into several protocol-valid TLS records.
+     * Cuts are concentrated around the SNI bytes when available. This survives
+     * TCP re-segmentation because the TLS record boundaries exist in the payload.
      */
-    private fun writeTlsRecordSplit(
+    private fun writeAggressiveTls(
+        remote: Socket,
         output: OutputStream,
         data: ByteArray,
         info: TlsClientHelloInfo,
-        delayMs: Long,
     ) {
-        val sniStart = info.sniStart ?: return output.write(data)
-        val sniEnd = info.sniEndExclusive ?: return output.write(data)
-        val split = ((sniStart + sniEnd) / 2)
-            .coerceIn(info.recordPayloadStart + 1, info.recordPayloadEndExclusive - 1)
-        val firstLength = split - info.recordPayloadStart
-        val secondLength = info.recordPayloadEndExclusive - split
-        if (firstLength <= 0 || secondLength <= 0) {
+        val payloadStart = info.recordPayloadStart.coerceIn(0, data.size)
+        val payloadEnd = info.recordPayloadEndExclusive.coerceIn(payloadStart, data.size)
+        if (payloadEnd - payloadStart < 8) {
             output.write(data)
             output.flush()
             return
         }
 
-        val firstHeader = tlsHeader(data, firstLength)
-        val secondHeader = tlsHeader(data, secondLength)
+        val cuts = linkedSetOf<Int>()
+        fun addCut(value: Int) {
+            if (value > payloadStart && value < payloadEnd) cuts += value
+        }
 
-        output.write(firstHeader)
-        output.write(data, info.recordPayloadStart, firstLength)
-        output.flush()
-        if (delayMs > 0) Thread.sleep(delayMs)
+        // Keep the handshake header intact, then make several semantic cuts.
+        addCut(payloadStart + 4)
 
-        output.write(secondHeader)
-        output.write(data, split, secondLength)
-        if (info.recordPayloadEndExclusive < data.size) {
-            output.write(
-                data,
-                info.recordPayloadEndExclusive,
-                data.size - info.recordPayloadEndExclusive,
-            )
+        val sniStart = info.sniStart
+        val sniEnd = info.sniEndExclusive
+        if (sniStart != null && sniEnd != null && sniStart < sniEnd) {
+            addCut(sniStart)
+            addCut(sniStart + 1)
+            addCut((sniStart + sniEnd) / 2)
+            addCut(sniEnd - 1)
+            addCut(sniEnd)
+        } else {
+            val length = payloadEnd - payloadStart
+            addCut(payloadStart + length / 3)
+            addCut(payloadStart + (length * 2) / 3)
+        }
+
+        var from = payloadStart
+        var urgentAttempted = false
+        val orderedCuts = cuts.toList().sorted() + payloadEnd
+
+        for (to in orderedCuts) {
+            if (to <= from) continue
+            writeTlsRecord(output, data, from, to)
+            output.flush()
+
+            // One OOB byte is enough for the diagnostic. Sending several urgent
+            // bytes can collapse urgent pointers and become less predictable.
+            if (!urgentAttempted && (sniStart == null || to >= sniStart)) {
+                urgentAttempted = true
+                runCatching { remote.sendUrgentData(0) }
+                    .onFailure { Log.d(TAG, "TCP urgent data unavailable: ${it.message}") }
+            }
+
+            if (to != payloadEnd) Thread.sleep(TLS_FRAGMENT_DELAY_MS)
+            from = to
+        }
+
+        if (payloadEnd < data.size) {
+            output.write(data, payloadEnd, data.size - payloadEnd)
         }
         output.flush()
     }
 
-    private fun tlsHeader(original: ByteArray, payloadLength: Int): ByteArray = byteArrayOf(
-        original[0],
-        original[1],
-        original[2],
-        ((payloadLength ushr 8) and 0xff).toByte(),
-        (payloadLength and 0xff).toByte(),
-    )
-
-    private fun writeMultiSplit(
+    private fun writeTlsRecord(
         output: OutputStream,
-        data: ByteArray,
-        markerStart: Int,
-        markerEndExclusive: Int,
+        original: ByteArray,
+        from: Int,
+        to: Int,
     ) {
+        val length = to - from
+        if (length <= 0) return
+        output.write(
+            byteArrayOf(
+                original[0],
+                original[1],
+                original[2],
+                ((length ushr 8) and 0xff).toByte(),
+                (length and 0xff).toByte(),
+            ),
+        )
+        output.write(original, from, length)
+    }
+
+    private fun writeHttpMultiSplit(output: OutputStream, data: ByteArray, http: HttpHostInfo) {
         if (data.size < 2) {
             output.write(data)
             return
         }
-        val middle = (markerStart + markerEndExclusive) / 2
-        val positions = listOf(markerStart + 1, middle, markerEndExclusive - 1)
+        val middle = (http.hostStart + http.hostEndExclusive) / 2
+        val positions = listOf(http.hostStart + 1, middle, http.hostEndExclusive - 1)
             .map { it.coerceIn(1, data.size - 1) }
             .distinct()
             .sorted()
@@ -399,7 +404,7 @@ class NativeDpiProxy(private val context: Context) {
             if (position <= offset) return@forEach
             output.write(data, offset, position - offset)
             output.flush()
-            Thread.sleep(SPLIT_DELAY_MS)
+            Thread.sleep(HTTP_SPLIT_DELAY_MS)
             offset = position
         }
         if (offset < data.size) output.write(data, offset, data.size - offset)
@@ -449,18 +454,13 @@ class NativeDpiProxy(private val context: Context) {
             soTimeout = UDP_POLL_TIMEOUT_MS
         }
 
-        sendReply(
-            controlOutput,
-            REP_SUCCEEDED,
-            InetAddress.getByName("127.0.0.1"),
-            relay.localPort,
-        )
+        sendReply(controlOutput, REP_SUCCEEDED, InetAddress.getByName("127.0.0.1"), relay.localPort)
 
         val monitor = launch(Dispatchers.IO) {
             try {
                 while (running.get() && controlInput.read() >= 0) Unit
             } catch (_: Throwable) {
-                // Control connection closing ends the UDP association.
+                // Closing the control connection ends the UDP association.
             } finally {
                 runCatching { relay.close() }
             }
@@ -501,18 +501,11 @@ class NativeDpiProxy(private val context: Context) {
                 val correlatedHost = datagram.target.host?.lowercase()
                     ?: NativeDnsCache.lookup(destination.address)
                 val displayHost = correlatedHost ?: datagram.target.displayHost
-                val decision = policy.resolve(correlatedHost, NativeTransport.UDP)
                 NativeRuntime.udpPacket(displayHost)
 
-                // QUIC commonly uses UDP/443. For configured BYPASS domains we can
-                // selectively suppress it so clients retry over TCP/TLS, where our
-                // protocol-aware transformations are available. Other UDP/443 flows
-                // are untouched.
-                if (
-                    forceTcpForBypassDomains &&
-                    destination.port == 443 &&
-                    decision.shouldBypass
-                ) {
+                // Alpha 4 intentionally suppresses every UDP/443 flow. This is a
+                // diagnostic force-TCP mode, not the final selective policy.
+                if (destination.port == HTTPS_PORT) {
                     NativeRuntime.quicFallback(displayHost)
                     continue
                 }
@@ -528,9 +521,7 @@ class NativeDpiProxy(private val context: Context) {
             } else {
                 val client = clientEndpoint ?: continue
                 val remote = source as? InetSocketAddress ?: continue
-                if (remote.port == DNS_PORT) {
-                    NativeDnsCache.observeResponse(bytes)
-                }
+                if (remote.port == DNS_PORT) NativeDnsCache.observeResponse(bytes)
                 val wrapped = encodeUdpResponse(remote.address, remote.port, bytes)
                 relay.send(DatagramPacket(wrapped, wrapped.size, client))
             }
@@ -546,10 +537,8 @@ class NativeDpiProxy(private val context: Context) {
             throw SocksException("Invalid UDP header")
         }
         val fragment = data[2].toInt() and 0xff
-        var offset = 3
-        val target = readTargetFromBytes(data, offset)
-        offset = target.second
-        return SocksUdpDatagram(fragment, target.first, data.copyOfRange(offset, data.size))
+        val target = readTargetFromBytes(data, 3)
+        return SocksUdpDatagram(fragment, target.first, data.copyOfRange(target.second, data.size))
     }
 
     private fun readTargetFromBytes(data: ByteArray, startOffset: Int): Pair<SocksTarget, Int> {
@@ -561,13 +550,13 @@ class NativeDpiProxy(private val context: Context) {
 
         when (atyp) {
             ATYP_IPV4 -> {
-                requireRemaining(data, offset, 4 + 2)
+                requireRemaining(data, offset, 6)
                 address = InetAddress.getByAddress(data.copyOfRange(offset, offset + 4))
                 host = null
                 offset += 4
             }
             ATYP_IPV6 -> {
-                requireRemaining(data, offset, 16 + 2)
+                requireRemaining(data, offset, 18)
                 address = InetAddress.getByAddress(data.copyOfRange(offset, offset + 16))
                 host = null
                 offset += 16
@@ -610,17 +599,15 @@ class NativeDpiProxy(private val context: Context) {
         return out.toByteArray()
     }
 
-    private fun readTarget(input: InputStream): SocksTarget {
-        return when (val atyp = readU8(input)) {
-            ATYP_IPV4 -> SocksTarget(null, InetAddress.getByAddress(readExact(input, 4)), readPort(input))
-            ATYP_IPV6 -> SocksTarget(null, InetAddress.getByAddress(readExact(input, 16)), readPort(input))
-            ATYP_DOMAIN -> {
-                val length = readU8(input)
-                val host = readExact(input, length).toString(StandardCharsets.US_ASCII)
-                SocksTarget(host, null, readPort(input))
-            }
-            else -> throw SocksException("Unsupported ATYP $atyp")
+    private fun readTarget(input: InputStream): SocksTarget = when (val atyp = readU8(input)) {
+        ATYP_IPV4 -> SocksTarget(null, InetAddress.getByAddress(readExact(input, 4)), readPort(input))
+        ATYP_IPV6 -> SocksTarget(null, InetAddress.getByAddress(readExact(input, 16)), readPort(input))
+        ATYP_DOMAIN -> {
+            val length = readU8(input)
+            val host = readExact(input, length).toString(StandardCharsets.US_ASCII)
+            SocksTarget(host, null, readPort(input))
         }
+        else -> throw SocksException("Unsupported ATYP $atyp")
     }
 
     private fun sendReply(output: OutputStream, reply: Int, address: InetAddress?, port: Int) {
@@ -723,15 +710,16 @@ class NativeDpiProxy(private val context: Context) {
         private const val REP_COMMAND_NOT_SUPPORTED = 7
 
         private const val CONNECT_TIMEOUT_MS = 8_000
-        private const val INITIAL_READ_TIMEOUT_MS = 1_200
+        private const val INITIAL_READ_TIMEOUT_MS = 1_500
         private const val UDP_POLL_TIMEOUT_MS = 1_000
         private const val MAX_INITIAL_BYTES = 64 * 1024
         private const val MAX_HTTP_HEADER_BYTES = 32 * 1024
         private const val MAX_UDP_PACKET = 65_507
         private const val COPY_BUFFER_SIZE = 32 * 1024
-        private const val SPLIT_DELAY_MS = 5L
-        private const val HYBRID_DELAY_MS = 8L
+        private const val TLS_FRAGMENT_DELAY_MS = 2L
+        private const val HTTP_SPLIT_DELAY_MS = 3L
         private const val DNS_PORT = 53
+        private const val HTTPS_PORT = 443
 
         private val HTTP_METHODS = listOf(
             "GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT ",
