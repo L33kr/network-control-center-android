@@ -17,9 +17,11 @@
 
     <application
         android:allowBackup="true"
-        android:label="Network Control Center"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
+        android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.NetworkControlCenter">
+        android:theme="@style/Theme.DpiControl">
 
         <activity
             android:name=".MainActivity"
