@@ -1,6 +1,7 @@
 package io.github.l33kr.networkcontrolcenter.core
 
 import android.content.Context
+import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiController
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,11 @@ class AndroidUnifiedEngineController(context: Context) : UnifiedEngineController
 
     init {
         scope.launch {
+            ByeDpiController.status.collectLatest { status ->
+                mutableState.value = mutableState.value.copy(byeDpi = status)
+            }
+        }
+        scope.launch {
             TgWsController.status.collectLatest { status ->
                 mutableState.value = mutableState.value.copy(tgWs = status)
             }
@@ -27,13 +33,13 @@ class AndroidUnifiedEngineController(context: Context) : UnifiedEngineController
     }
 
     override suspend fun startByeDpi() {
-        // The VPN engine is connected in the next integration step.
-        // Keeping the state explicit prevents the UI from claiming it is running.
-        mutableState.value = mutableState.value.copy(byeDpi = EngineStatus.FAILED)
+        mutableState.value = mutableState.value.copy(byeDpi = EngineStatus.STARTING)
+        ByeDpiController.start(appContext)
     }
 
     override suspend fun stopByeDpi() {
-        mutableState.value = mutableState.value.copy(byeDpi = EngineStatus.STOPPED)
+        mutableState.value = mutableState.value.copy(byeDpi = EngineStatus.STOPPING)
+        ByeDpiController.stop(appContext)
     }
 
     override suspend fun startTgWs() {
