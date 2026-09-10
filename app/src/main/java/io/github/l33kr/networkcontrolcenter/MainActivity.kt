@@ -15,16 +15,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,9 +42,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiConfigStore
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiController
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiMode
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategies
+import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyCatalog
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
@@ -110,9 +118,27 @@ private fun NetworkControlCenterScreen(
     var selectedModeName by rememberSaveable {
         mutableStateOf(ByeDpiController.selectedMode(context).name)
     }
+    var selectedStrategyName by rememberSaveable {
+        mutableStateOf(ByeDpiConfigStore.load(context).strategyName)
+    }
+    var showStrategyCatalog by rememberSaveable { mutableStateOf(false) }
+
     val selectedMode = runCatching { ByeDpiMode.valueOf(selectedModeName) }
         .getOrDefault(ByeDpiMode.AUTO)
     val byeCanConfigure = state.byeDpi == EngineStatus.STOPPED || state.byeDpi == EngineStatus.FAILED
+
+    if (showStrategyCatalog) {
+        ReadyStrategyDialog(
+            canConfigure = byeCanConfigure,
+            onDismiss = { showStrategyCatalog = false },
+            onSelected = { name, command ->
+                ByeDpiConfigStore.setCatalogStrategy(context, name, command)
+                selectedModeName = ByeDpiMode.MANUAL.name
+                selectedStrategyName = name
+                showStrategyCatalog = false
+            },
+        )
+    }
 
     Scaffold { padding ->
         Column(
@@ -154,12 +180,24 @@ private fun NetworkControlCenterScreen(
                     Text("Режим обхода DPI", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (byeCanConfigure) {
-                            "Выбери профиль и включи ByeDPI. Auto сам использует более агрессивную цепочку на мобильной сети."
+                            "Можно выбрать простой профиль или одну из готовых стратегий ByeByeDPI."
                         } else {
-                            "Чтобы сменить профиль, сначала выключи ByeDPI."
+                            "Чтобы сменить стратегию, сначала выключи ByeDPI."
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
+
+                    selectedStrategyName?.let {
+                        Text("Выбрано: $it", style = MaterialTheme.typography.labelLarge)
+                    }
+
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = byeCanConfigure,
+                        onClick = { showStrategyCatalog = true },
+                    ) {
+                        Text("Готовые стратегии ByeDPI")
+                    }
 
                     ByeDpiStrategies.selectable
                         .filter { it.mode != ByeDpiMode.MANUAL }
@@ -167,11 +205,12 @@ private fun NetworkControlCenterScreen(
                             ModeButton(
                                 title = preset.title,
                                 description = preset.description,
-                                selected = selectedMode == preset.mode,
+                                selected = selectedMode == preset.mode && selectedStrategyName == null,
                                 enabled = byeCanConfigure,
                                 onClick = {
                                     ByeDpiController.setMode(context, preset.mode)
                                     selectedModeName = preset.mode.name
+                                    selectedStrategyName = null
                                 },
                             )
                         }
@@ -206,11 +245,70 @@ private fun NetworkControlCenterScreen(
 
             Spacer(Modifier.height(4.dp))
             Text(
-                "Для первой проверки DPI лучше выключить Telegram WS и тестировать ByeDPI отдельно: сначала Auto, затем Mobile RU или Strong / Fake.",
+                "Для YouTube на мобильной сети сначала попробуй несколько верхних готовых стратегий. Следующий этап — автоматический прогон этого каталога и выбор победителя.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
     }
+}
+
+@Composable
+private fun ReadyStrategyDialog(
+    canConfigure: Boolean,
+    onDismiss: () -> Unit,
+    onSelected: (String, String) -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val catalog = remember { ByeDpiStrategyCatalog.load(context) }
+    var sni by rememberSaveable { mutableStateOf(ByeDpiConfigStore.load(context).sni) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Готовые стратегии") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Каталог из ByeByeDPI: ${catalog.size} вариантов. {sni} заменяется значением ниже.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = sni,
+                    onValueChange = { sni = it.trim() },
+                    label = { Text("Fake SNI") },
+                    singleLine = true,
+                    supportingText = { Text("По умолчанию: google.com") },
+                )
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 460.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(catalog, key = { it.index }) { strategy ->
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = canConfigure,
+                            onClick = {
+                                ByeDpiConfigStore.setSni(context, sni)
+                                onSelected(strategy.name, strategy.command)
+                            },
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(strategy.name)
+                                Text(
+                                    strategy.command,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 3,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        },
+    )
 }
 
 @Composable
