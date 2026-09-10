@@ -19,6 +19,9 @@ import hev.htproxy.TProxyService
 import io.github.l33kr.networkcontrolcenter.MainActivity
 import io.github.l33kr.networkcontrolcenter.R
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
+import io.github.l33kr.networkcontrolcenter.nativecore.EngineMode
+import io.github.l33kr.networkcontrolcenter.nativecore.EngineModeStore
+import io.github.l33kr.networkcontrolcenter.nativecore.NativeDpiProxy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,10 +40,18 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Historical class name is retained so existing manifests/controllers keep
+ * working. On the experimental branch it defaults to DPI Control's own native
+ * stream engine; ByeDPI remains available only as an internal legacy fallback
+ * mode for development comparisons.
+ */
 class ByeDpiVpnService : VpnService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val proxy = ByeDpiProxy()
+    private val legacyProxy = ByeDpiProxy()
     private val stopping = AtomicBoolean(false)
+    private var nativeProxy: NativeDpiProxy? = null
+    private var activeEngineMode: EngineMode = EngineMode.NATIVE_ALPHA
     private var proxyJob: Job? = null
     private var tun: ParcelFileDescriptor? = null
     private var hevConfig: File? = null
@@ -49,7 +60,7 @@ class ByeDpiVpnService : VpnService() {
         const val ACTION_START = "io.github.l33kr.networkcontrolcenter.byedpi.START"
         const val ACTION_STOP = "io.github.l33kr.networkcontrolcenter.byedpi.STOP"
 
-        private const val TAG = "ByeDpiVpnService"
+        private const val TAG = "DpiVpnService"
         private const val CHANNEL_ID = "byedpi_vpn"
         private const val NOTIFICATION_ID = 1101
 
@@ -88,36 +99,41 @@ class ByeDpiVpnService : VpnService() {
         stopping.set(false)
         _lastError.value = null
         _status.value = EngineStatus.STARTING
-        startForegroundCompat(createNotification("Запуск ByeDPI…"))
+        activeEngineMode = EngineModeStore.load(this)
+        startForegroundCompat(createNotification("Запуск сетевого движка…"))
 
         scope.launch {
             try {
                 val config = ByeDpiConfigStore.load(this@ByeDpiVpnService)
                 val network = detectNetwork()
-                val strategy = ByeDpiStrategies.resolve(config, network.isCellular)
                 val useIpv6 = shouldRouteIpv6(config.ipv6Mode, network)
+                val legacyStrategy = if (activeEngineMode == EngineMode.LEGACY_BYEDPI) {
+                    ByeDpiStrategies.resolve(config, network.isCellular)
+                } else null
 
-                _activeProfile.value = strategy.title
+                val profileTitle = when (activeEngineMode) {
+                    EngineMode.NATIVE_ALPHA -> "Native Engine α"
+                    EngineMode.LEGACY_BYEDPI -> legacyStrategy?.title ?: "Legacy"
+                }
+
+                _activeProfile.value = profileTitle
                 _networkLabel.value = network.label
                 _ipv6Active.value = useIpv6
 
-                Log.i(
-                    TAG,
-                    "Starting profile=${strategy.title}, network=${network.label}, ipv6=$useIpv6, command=${strategy.command}",
-                )
-                updateNotification("${strategy.title} · ${network.label} · запуск…")
+                Log.i(TAG, "Starting engine=$activeEngineMode, network=${network.label}, ipv6=$useIpv6")
+                updateNotification("$profileTitle · ${network.label} · запуск…")
 
-                startProxy(config, strategy.command)
+                startProxy(config, legacyStrategy?.command)
 
                 if (!waitForProxy(config.bindIp, config.port)) {
-                    error("ByeDPI SOCKS5 не запустился. Проверьте стратегию")
+                    error("Локальный SOCKS5 движок не запустился")
                 }
 
                 val configFile = createHevConfig(config)
                 hevConfig = configFile
 
                 val builder = Builder()
-                    .setSession("DPI Control · ByeDPI")
+                    .setSession("DPI Control")
                     .setConfigureIntent(
                         PendingIntent.getActivity(
                             this@ByeDpiVpnService,
@@ -137,7 +153,8 @@ class ByeDpiVpnService : VpnService() {
                 if (config.dns.isNotBlank()) builder.addDnsServer(config.dns)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
-                // Native local proxies must stay outside the TUN to avoid VPN loops.
+                // Our local SOCKS engine and its upstream sockets must remain
+                // outside the TUN or they would recursively enter the VPN.
                 builder.addDisallowedApplication(packageName)
 
                 val descriptor = builder.establish()
@@ -145,37 +162,50 @@ class ByeDpiVpnService : VpnService() {
                 tun = descriptor
 
                 if (!TProxyService.TProxyStartService(configFile.absolutePath, descriptor.fd)) {
-                    error("hev-socks5-tunnel не запустился")
+                    error("TUN → SOCKS мост не запустился")
                 }
 
                 _status.value = EngineStatus.RUNNING
                 val ipv6Text = if (useIpv6) "IPv4+IPv6" else "IPv4"
-                updateNotification("${strategy.title} · ${network.label} · $ipv6Text")
+                updateNotification("$profileTitle · ${network.label} · $ipv6Text")
             } catch (t: Throwable) {
-                Log.e(TAG, "Failed to start ByeDPI VPN", t)
+                Log.e(TAG, "Failed to start DPI VPN", t)
                 val message = t.message ?: t.javaClass.simpleName
                 _lastError.value = message
                 _status.value = EngineStatus.FAILED
-                updateNotification("Ошибка ByeDPI: $message")
+                updateNotification("Ошибка: $message")
                 cleanupAfterFailure()
             }
         }
     }
 
-    private fun startProxy(config: ByeDpiConfig, command: String) {
-        check(proxyJob == null) { "ByeDPI proxy job already exists" }
-        val argsConfig = config.copy(command = command)
+    private fun startProxy(config: ByeDpiConfig, legacyCommand: String?) {
+        check(proxyJob == null) { "Proxy job already exists" }
+
         proxyJob = scope.launch(Dispatchers.IO) {
-            val code = runCatching { proxy.start(argsConfig) }
-                .onFailure { Log.e(TAG, "ByeDPI native loop failed", it) }
-                .getOrDefault(-1)
+            val code = when (activeEngineMode) {
+                EngineMode.NATIVE_ALPHA -> {
+                    val engine = NativeDpiProxy(applicationContext)
+                    nativeProxy = engine
+                    runCatching { engine.start(config.bindIp, config.port) }
+                        .onFailure { Log.e(TAG, "Native engine loop failed", it) }
+                        .getOrDefault(-1)
+                }
+
+                EngineMode.LEGACY_BYEDPI -> {
+                    val argsConfig = config.copy(command = legacyCommand ?: config.command)
+                    runCatching { legacyProxy.start(argsConfig) }
+                        .onFailure { Log.e(TAG, "Legacy ByeDPI loop failed", it) }
+                        .getOrDefault(-1)
+                }
+            }
 
             withContext(Dispatchers.Main) {
                 if (!stopping.get() && _status.value != EngineStatus.FAILED) {
-                    Log.e(TAG, "ByeDPI exited unexpectedly with code $code")
-                    _lastError.value = "Ядро ByeDPI завершилось: $code"
+                    Log.e(TAG, "Proxy engine exited unexpectedly with code $code")
+                    _lastError.value = "Сетевой движок завершился: $code"
                     _status.value = EngineStatus.FAILED
-                    updateNotification("ByeDPI завершился: $code")
+                    updateNotification("Движок завершился: $code")
                     scope.launch { cleanupAfterFailure() }
                 }
             }
@@ -251,7 +281,7 @@ class ByeDpiVpnService : VpnService() {
     private suspend fun stopEngine() {
         if (_status.value == EngineStatus.STOPPED || !stopping.compareAndSet(false, true)) return
         _status.value = EngineStatus.STOPPING
-        updateNotification("Остановка ByeDPI…")
+        updateNotification("Остановка…")
 
         stopHevAndTun()
         stopProxyOnly()
@@ -284,15 +314,20 @@ class ByeDpiVpnService : VpnService() {
 
     private suspend fun stopProxyOnly() {
         val job = proxyJob ?: return
-        runCatching { proxy.stop() }
+        when (activeEngineMode) {
+            EngineMode.NATIVE_ALPHA -> runCatching { nativeProxy?.stop() }
+            EngineMode.LEGACY_BYEDPI -> runCatching { legacyProxy.stop() }
+        }
+
         val stopped = withTimeoutOrNull(3000) {
             job.join()
             true
         } ?: false
-        if (!stopped) {
-            runCatching { proxy.forceClose() }
+        if (!stopped && activeEngineMode == EngineMode.LEGACY_BYEDPI) {
+            runCatching { legacyProxy.forceClose() }
             withTimeoutOrNull(1000) { job.join() }
         }
+        nativeProxy = null
         proxyJob = null
     }
 
@@ -331,10 +366,10 @@ class ByeDpiVpnService : VpnService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "DPI Control · ByeDPI",
+            "DPI Control",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Локальная обработка трафика через ByeDPI"
+            description = "Локальная обработка сетевого трафика"
             setSound(null, null)
             enableVibration(false)
             setShowBadge(false)
@@ -358,7 +393,7 @@ class ByeDpiVpnService : VpnService() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_dpi)
-            .setContentTitle("DPI Control · ByeDPI")
+            .setContentTitle("DPI Control")
             .setContentText(text)
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", stop)
@@ -375,6 +410,7 @@ class ByeDpiVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        runCatching { nativeProxy?.stop() }
         scope.cancel()
         super.onDestroy()
     }
