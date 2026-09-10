@@ -21,10 +21,11 @@ data class NativePolicyDecision(
     val technique: NativeTechnique,
     val profileName: String,
     val matchedDomain: String? = null,
+    val strategyTitle: String? = null,
 )
 
 /**
- * Resolves the existing v2 profile/list model into native-engine actions.
+ * Resolves the existing v2 profile/list model into actions owned by our engine.
  * The first enabled matching profile wins; an empty-domain profile is a catch-all.
  */
 class NativePolicyResolver(private val context: Context) {
@@ -43,27 +44,30 @@ class NativePolicyResolver(private val context: Context) {
                     technique = NativeTechnique.PASS,
                     profileName = profile.name,
                     matchedDomain = match,
+                    strategyTitle = "PASS",
                 )
             }
 
-            // Native plans deliberately do not interpret ByeDPI command strings.
-            // They are selected from protocol-safe primitives that we own.
+            val nativePreset = NativeStrategies.fromCommand(profile.strategyCommand)
             val technique = when (transport) {
-                NativeTransport.UDP -> NativeTechnique.PASS // UDP/QUIC relay is transparent in alpha 1.
-                NativeTransport.TCP -> when {
-                    profile.strategyName?.contains("record", ignoreCase = true) == true -> NativeTechnique.TLS_RECORD_SPLIT
-                    profile.strategyName?.contains("split", ignoreCase = true) == true -> NativeTechnique.MULTI_SPLIT
-                    else -> NativeTechnique.HYBRID
-                }
+                // UDP/QUIC is intentionally transparent in alpha 1. It remains
+                // functional while the dedicated QUIC manipulator is developed.
+                NativeTransport.UDP -> NativeTechnique.PASS
+                NativeTransport.TCP -> nativePreset?.technique ?: NativeTechnique.HYBRID
             }
             return NativePolicyDecision(
                 technique = technique,
                 profileName = profile.name,
                 matchedDomain = match,
+                strategyTitle = nativePreset?.title ?: "Auto / Hybrid",
             )
         }
 
-        return NativePolicyDecision(NativeTechnique.PASS, "Остальной трафик")
+        return NativePolicyDecision(
+            technique = NativeTechnique.PASS,
+            profileName = "Остальной трафик",
+            strategyTitle = "PASS",
+        )
     }
 
     private fun protocolMatches(protocol: ProfileProtocol, transport: NativeTransport): Boolean = when (protocol) {
