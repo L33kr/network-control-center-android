@@ -34,11 +34,13 @@ object ProfileEngineBridge {
         }
 
         if (directAndroidProfile != null) {
+            val exactByeByeControl = directAndroidProfile.strategyName
+                ?.contains("ByeBye raw default", ignoreCase = true) == true
             ByeDpiConfigStore.setManualStrategy(
                 context = context,
                 command = ByeDpiRuntimeStore.prepareNativeCommand(
                     command = directAndroidProfile.strategyCommand.orEmpty(),
-                    addUdpFallback = true,
+                    addUdpFallback = !exactByeByeControl,
                 ),
                 name = "Native · ${directAndroidProfile.strategyName}",
             )
