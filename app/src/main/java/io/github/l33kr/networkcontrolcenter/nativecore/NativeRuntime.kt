@@ -43,8 +43,12 @@ object NativeRuntime {
     }
 
     fun transformed(host: String?, technique: NativeTechnique) {
+        transformed(host, technique.name)
+    }
+
+    fun transformed(host: String?, techniqueLabel: String) {
         modified.incrementAndGet()
-        publish(lastHost = host, lastTechnique = technique.name)
+        publish(lastHost = host, lastTechnique = techniqueLabel)
     }
 
     fun udpPacket(host: String?) {
