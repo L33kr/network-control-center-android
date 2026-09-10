@@ -20,6 +20,31 @@ object ProfileEngineBridge {
             return compiled
         }
 
+        // Android · strategies are a compatibility/diagnostic family. When one is
+        // assigned to an active TCP/TLS BYPASS profile, execute it directly rather
+        // than wrapping it in ProfileCompiler groups. This gives us a one-to-one
+        // comparison with ByeByeDPI and tells us whether profile compilation itself
+        // is breaking otherwise valid ByeDPI commands.
+        val directAndroidProfile = set.profiles.firstOrNull { profile ->
+            profile.enabled &&
+                profile.action == ProfileAction.BYPASS &&
+                profile.protocol != ProfileProtocol.UDP_QUIC &&
+                profile.strategyName?.startsWith("Android ·") == true &&
+                !profile.strategyCommand.isNullOrBlank()
+        }
+
+        if (directAndroidProfile != null) {
+            ByeDpiConfigStore.setManualStrategy(
+                context = context,
+                command = ByeDpiRuntimeStore.prepareNativeCommand(
+                    command = directAndroidProfile.strategyCommand.orEmpty(),
+                    addUdpFallback = true,
+                ),
+                name = "Native · ${directAndroidProfile.strategyName}",
+            )
+            return compiled
+        }
+
         ByeDpiConfigStore.setManualStrategy(
             context = context,
             command = compiled.command,
