@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.l33kr.networkcontrolcenter"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0-beta.1"
+        versionCode = 5
+        versionName = "0.5.0-dev"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -43,9 +43,7 @@ android {
     }
 
     sourceSets.getByName("main") {
-        // Pinned TG WS libraries are provided by bootstrap scripts / CI checkout.
         jniLibs.srcDir("${rootDir}/third_party/tg-ws-proxy-android/app/src/main/jniLibs")
-        // Current hev-socks5-tunnel is compiled by buildHevSocks5Tunnel.
         jniLibs.srcDir(layout.buildDirectory.dir("generated/hevJniLibs"))
     }
 
