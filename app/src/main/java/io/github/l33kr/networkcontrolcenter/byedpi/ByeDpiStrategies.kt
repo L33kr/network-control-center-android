@@ -9,14 +9,15 @@ data class ByeDpiStrategy(
 
 object ByeDpiStrategies {
     /**
-     * Uses current ByeDPI auto groups. The first group is relatively light;
-     * later groups are activated by timeout/reset/redirect/TLS-error triggers.
+     * ByeDPI 17.3 uses letter flags for --auto-mode:
+     * s = sort groups by trigger count, o = enable the extended reconnect mode.
+     * This is the current equivalent of the older numeric "mode 3" behaviour.
      */
     val AUTO_WIFI = ByeDpiStrategy(
         mode = ByeDpiMode.AUTO,
         title = "Auto",
         description = "Автопереключение групп ByeDPI с кешем успешного варианта",
-        command = "-L3 -u86400 -T3 -o1 -r-5+se -a1 -At,r,s -d1 -n www.google.com -Qr -f-1 -t8 -a1 -At,r,s -s1+s -d3+s -s6+s -s12+s -s20+s -s30+s -a1",
+        command = "--auto-mode s,o -u86400 -T3 -o1 -r-5+se -a1 -At,r,s -d1 -n www.google.com -Qr -f-1 -t8 -a1 -At,r,s -s1+s -d3+s -s6+s -s12+s -s20+s -s30+s -a1",
     )
 
     /**
@@ -28,7 +29,7 @@ object ByeDpiStrategies {
         mode = ByeDpiMode.AUTO,
         title = "Auto · Mobile",
         description = "Авто-профиль для сотовой сети: split/disorder + fallback fake",
-        command = "-L3 -u86400 -T2.5 -o1 -d1 -a1 -At,r,s -s1 -d1 -s5+s -s10+s -s15+s -s20+s -r1+s -a1 -At,r,s -f-1 -t8 -s1+s -d3+s -s6+s -s12+s -s20+s -s30+s -a1",
+        command = "--auto-mode s,o -u86400 -T2.5 -o1 -d1 -a1 -At,r,s -s1 -d1 -s5+s -s10+s -s15+s -s20+s -r1+s -a1 -At,r,s -f-1 -t8 -s1+s -d3+s -s6+s -s12+s -s20+s -s30+s -a1",
     )
 
     val MOBILE_RU = ByeDpiStrategy(
