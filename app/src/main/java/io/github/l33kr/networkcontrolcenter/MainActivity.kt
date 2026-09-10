@@ -89,6 +89,8 @@ private fun NetworkControlCenterScreen(
     onApplyTelegramProxy: () -> Unit,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
+    val tgWsPort by TgWsController.activePort.collectAsStateWithLifecycle()
+    val tgWsError by TgWsController.lastError.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
     Scaffold { padding ->
@@ -116,10 +118,15 @@ private fun NetworkControlCenterScreen(
 
             EngineCard(
                 title = "Telegram WS Proxy",
-                subtitle = "Локальный MTProto → WSS / Cloudflare → Telegram DC",
+                subtitle = when {
+                    state.tgWs == EngineStatus.RUNNING && tgWsPort > 0 ->
+                        "Локальный MTProto на 127.0.0.1:$tgWsPort → WSS / Cloudflare → Telegram DC"
+                    else -> "Локальный MTProto → WSS / Cloudflare → Telegram DC"
+                },
                 status = state.tgWs,
                 checked = state.tgWs == EngineStatus.RUNNING || state.tgWs == EngineStatus.STARTING,
                 switchEnabled = state.tgWs != EngineStatus.STOPPING,
+                detail = if (state.tgWs == EngineStatus.FAILED) tgWsError else null,
                 onEnabledChange = { enabled ->
                     scope.launch {
                         if (enabled) controller.startTgWs() else controller.stopTgWs()
@@ -151,6 +158,7 @@ private fun EngineCard(
     status: EngineStatus,
     checked: Boolean,
     switchEnabled: Boolean,
+    detail: String? = null,
     onEnabledChange: (Boolean) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -167,6 +175,10 @@ private fun EngineCard(
                 Text(subtitle, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(statusLabel(status), style = MaterialTheme.typography.labelMedium)
+                detail?.takeIf { it.isNotBlank() }?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                }
             }
             Switch(
                 checked = checked,
