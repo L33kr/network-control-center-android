@@ -2,7 +2,16 @@ package io.github.l33kr.networkcontrolcenter.byedpi
 
 import android.content.Context
 
+enum class ByeDpiMode {
+    AUTO,
+    MOBILE_RU,
+    BALANCED,
+    STRONG_FAKE,
+    MANUAL,
+}
+
 enum class Ipv6Mode {
+    AUTO,
     OFF,
     ON,
 }
@@ -10,17 +19,19 @@ enum class Ipv6Mode {
 data class ByeDpiConfig(
     val bindIp: String = "127.0.0.1",
     val port: Int = 1080,
-    val command: String = "-o1 -a1 -r-5+se",
+    val mode: ByeDpiMode = ByeDpiMode.AUTO,
+    /** Used only when [mode] is MANUAL. Kept compatible with the old `command` preference. */
+    val command: String = ByeDpiStrategies.BALANCED.command,
     val dns: String = "1.1.1.1",
-    val ipv6Mode: Ipv6Mode = Ipv6Mode.OFF,
+    val ipv6Mode: Ipv6Mode = Ipv6Mode.AUTO,
 ) {
-    fun toArgs(): Array<String> = buildList {
+    fun toArgs(commandOverride: String? = null): Array<String> = buildList {
         add("ciadpi")
         add("--ip")
         add(bindIp)
         add("--port")
         add(port.toString())
-        addAll(shellSplit(command))
+        addAll(shellSplit(commandOverride ?: command))
     }.toTypedArray()
 }
 
@@ -32,11 +43,19 @@ object ByeDpiConfigStore {
         return ByeDpiConfig(
             bindIp = prefs.getString("bind_ip", "127.0.0.1") ?: "127.0.0.1",
             port = prefs.getInt("port", 1080).coerceIn(1, 65535),
-            command = prefs.getString("command", "-o1 -a1 -r-5+se") ?: "-o1 -a1 -r-5+se",
+            mode = runCatching {
+                ByeDpiMode.valueOf(
+                    prefs.getString("mode", ByeDpiMode.AUTO.name) ?: ByeDpiMode.AUTO.name,
+                )
+            }.getOrDefault(ByeDpiMode.AUTO),
+            command = prefs.getString("command", ByeDpiStrategies.BALANCED.command)
+                ?: ByeDpiStrategies.BALANCED.command,
             dns = prefs.getString("dns", "1.1.1.1") ?: "1.1.1.1",
             ipv6Mode = runCatching {
-                Ipv6Mode.valueOf(prefs.getString("ipv6_mode", Ipv6Mode.OFF.name) ?: Ipv6Mode.OFF.name)
-            }.getOrDefault(Ipv6Mode.OFF),
+                Ipv6Mode.valueOf(
+                    prefs.getString("ipv6_mode", Ipv6Mode.AUTO.name) ?: Ipv6Mode.AUTO.name,
+                )
+            }.getOrDefault(Ipv6Mode.AUTO),
         )
     }
 
@@ -45,14 +64,20 @@ object ByeDpiConfigStore {
             .edit()
             .putString("bind_ip", config.bindIp)
             .putInt("port", config.port)
+            .putString("mode", config.mode.name)
             .putString("command", config.command)
             .putString("dns", config.dns)
             .putString("ipv6_mode", config.ipv6Mode.name)
             .apply()
     }
+
+    fun setMode(context: Context, mode: ByeDpiMode) {
+        val current = load(context)
+        save(context, current.copy(mode = mode))
+    }
 }
 
-private fun shellSplit(input: String): List<String> {
+internal fun shellSplit(input: String): List<String> {
     val result = mutableListOf<String>()
     val current = StringBuilder()
     var quote: Char? = null
