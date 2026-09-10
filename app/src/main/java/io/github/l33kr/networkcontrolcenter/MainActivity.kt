@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.GenericProfileLabelsMigration
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileEngineBridge
 import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileStore
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
@@ -23,6 +24,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         ProfileStore.ensureInitialized(applicationContext)
+        GenericProfileLabelsMigration.apply(applicationContext)
         ProfileEngineBridge.applyActiveSet(applicationContext)
 
         setContent {
