@@ -1,6 +1,7 @@
 package io.github.l33kr.networkcontrolcenter
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -17,29 +18,52 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
+import io.github.l33kr.networkcontrolcenter.core.EngineStatus
+import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
-                NetworkControlCenterScreen()
+                val controller = remember {
+                    AndroidUnifiedEngineController(applicationContext)
+                }
+                NetworkControlCenterScreen(
+                    controller = controller,
+                    onApplyTelegramProxy = {
+                        val opened = TgWsController.openTelegramProxy(applicationContext)
+                        if (!opened) {
+                            Toast.makeText(
+                                this,
+                                "Не удалось открыть Telegram-клиент",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    },
+                )
             }
         }
     }
 }
 
-@androidx.compose.runtime.Composable
-private fun NetworkControlCenterScreen() {
-    var byeDpiEnabled by remember { mutableStateOf(false) }
-    var tgWsEnabled by remember { mutableStateOf(false) }
+@Composable
+private fun NetworkControlCenterScreen(
+    controller: AndroidUnifiedEngineController,
+    onApplyTelegramProxy: () -> Unit,
+) {
+    val state by controller.state.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
 
     Scaffold { padding ->
         Column(
@@ -47,53 +71,66 @@ private fun NetworkControlCenterScreen() {
                 .fillMaxSize()
                 .padding(padding)
                 .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("Network Control Center", style = MaterialTheme.typography.headlineMedium)
             Text(
-                "ByeDPI and Telegram WS are kept as independent engines.",
-                style = MaterialTheme.typography.bodyMedium
+                "Два независимых движка в одном приложении.",
+                style = MaterialTheme.typography.bodyMedium,
             )
 
             EngineCard(
-                title = "Internet / ByeDPI",
-                subtitle = "System traffic through Android VPN and ByeDPI",
-                enabled = byeDpiEnabled,
-                onEnabledChange = { byeDpiEnabled = it }
+                title = "Интернет / ByeDPI",
+                subtitle = "Системный трафик через Android VPN и ByeDPI · следующий этап",
+                status = state.byeDpi,
+                checked = false,
+                switchEnabled = false,
+                onEnabledChange = {},
             )
 
             EngineCard(
                 title = "Telegram WS Proxy",
-                subtitle = "Local MTProto proxy with WSS / Cloudflare transport",
-                enabled = tgWsEnabled,
-                onEnabledChange = { tgWsEnabled = it }
+                subtitle = "Локальный MTProto → WSS / Cloudflare → Telegram DC",
+                status = state.tgWs,
+                checked = state.tgWs == EngineStatus.RUNNING || state.tgWs == EngineStatus.STARTING,
+                switchEnabled = state.tgWs != EngineStatus.STOPPING,
+                onEnabledChange = { enabled ->
+                    scope.launch {
+                        if (enabled) controller.startTgWs() else controller.stopTgWs()
+                    }
+                },
             )
-
-            Spacer(Modifier.height(4.dp))
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                onClick = {
-                    byeDpiEnabled = true
-                    tgWsEnabled = true
-                }
+                enabled = state.tgWs == EngineStatus.RUNNING,
+                onClick = onApplyTelegramProxy,
             ) {
-                Text("Enable all")
+                Text("Применить прокси в Telegram")
             }
 
+            Spacer(Modifier.height(4.dp))
             Text(
-                "Current build is the project shell. Engine services will be connected next.",
-                style = MaterialTheme.typography.bodySmall
+                when (state.tgWs) {
+                    EngineStatus.STOPPED -> "Telegram WS выключен"
+                    EngineStatus.STARTING -> "Telegram WS запускается…"
+                    EngineStatus.RUNNING -> "Telegram WS работает на 127.0.0.1:1443"
+                    EngineStatus.STOPPING -> "Telegram WS останавливается…"
+                    EngineStatus.FAILED -> "Telegram WS: ошибка запуска"
+                },
+                style = MaterialTheme.typography.bodySmall,
             )
         }
     }
 }
 
-@androidx.compose.runtime.Composable
+@Composable
 private fun EngineCard(
     title: String,
     subtitle: String,
-    enabled: Boolean,
+    status: EngineStatus,
+    checked: Boolean,
+    switchEnabled: Boolean,
     onEnabledChange: (Boolean) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -102,14 +139,28 @@ private fun EngineCard(
                 .fillMaxWidth()
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
                 Text(subtitle, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(6.dp))
+                Text(statusLabel(status), style = MaterialTheme.typography.labelMedium)
             }
-            Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            Switch(
+                checked = checked,
+                enabled = switchEnabled,
+                onCheckedChange = onEnabledChange,
+            )
         }
     }
+}
+
+private fun statusLabel(status: EngineStatus): String = when (status) {
+    EngineStatus.STOPPED -> "Отключено"
+    EngineStatus.STARTING -> "Запуск…"
+    EngineStatus.RUNNING -> "Работает"
+    EngineStatus.STOPPING -> "Остановка…"
+    EngineStatus.FAILED -> "Ошибка"
 }
