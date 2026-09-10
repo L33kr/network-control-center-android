@@ -12,7 +12,11 @@ data class CatalogStrategy(
     val source: String = "ByeByeDPI",
     val recommended: Boolean = false,
     val protocol: String = "TCP/TLS",
-)
+) {
+    val stageCount: Int get() = ByeDpiStrategyPlan.stageCount(command)
+    val isMultiStage: Boolean get() = stageCount > 1
+    val displayCommand: String get() = ByeDpiStrategyPlan.formatForDisplay(command)
+}
 
 object ByeDpiStrategyCatalog {
     private val quic = listOf(
@@ -58,13 +62,23 @@ object ByeDpiStrategyCatalog {
                     .map(String::trim)
                     .filter { it.isNotEmpty() && !it.startsWith("#") }
                     .mapIndexed { index, command ->
+                        val stages = ByeDpiStrategyPlan.stageCount(command)
                         CatalogStrategy(
                             index = 40_000 + index,
                             id = "legacy-${index + 1}",
-                            name = "ByeByeDPI test · ${index + 1}",
+                            name = if (stages > 1) {
+                                "ByeByeDPI · ${index + 1} · $stages стадии"
+                            } else {
+                                "ByeByeDPI · ${index + 1}"
+                            },
                             command = command,
                             category = "ByeByeDPI",
-                            description = "Исходная команда из proxytest_strategies.list без адаптации.",
+                            description = if (stages > 1) {
+                                "Оригинальная многоступенчатая стратегия из proxytest_strategies.list. " +
+                                    "Внутренние -A переходы сохранены без упрощения."
+                            } else {
+                                "Оригинальная одноступенчатая команда из proxytest_strategies.list."
+                            },
                             source = "ByeByeDPI proxy tester",
                             recommended = false,
                         )
@@ -75,9 +89,8 @@ object ByeDpiStrategyCatalog {
     }
 
     /**
-     * Default automatic search intentionally uses only the Android/Linux-native
-     * family. The large ByeByeDPI proxy-test list stays available for manual/deep
-     * checks but no longer drowns the first pass in unrelated combinations.
+     * Quick search starts from exact Android-safe ByeByeDPI seeds and their
+     * one-dimensional descendants. Multi-stage seeds remain multi-stage.
      */
     fun quickCandidates(context: Context): List<CatalogStrategy> = ByeDpiStrategyGenerator.quick()
         .filter { it.protocol == "TCP/TLS" }
