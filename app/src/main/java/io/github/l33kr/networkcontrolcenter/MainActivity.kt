@@ -14,33 +14,39 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Send
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -49,6 +55,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -72,25 +79,32 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiConfig
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiConfigStore
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiController
-import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiMode
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategies
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyCatalog
-import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyTester
 import io.github.l33kr.networkcontrolcenter.byedpi.CatalogStrategy
-import io.github.l33kr.networkcontrolcenter.byedpi.DomainFilterMode
-import io.github.l33kr.networkcontrolcenter.byedpi.DomainPresets
+import io.github.l33kr.networkcontrolcenter.byedpi.Ipv6Mode
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.DomainListModel
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileAction
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileCompiler
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileEngineBridge
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileProtocol
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileSetModel
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.ProfileStore
+import io.github.l33kr.networkcontrolcenter.byedpi.profile.TrafficProfile
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
 import io.github.l33kr.networkcontrolcenter.core.EngineState
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
 import io.github.l33kr.networkcontrolcenter.ui.theme.DpiControlTheme
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        ProfileStore.ensureInitialized(applicationContext)
+        ProfileEngineBridge.applyActiveSet(applicationContext)
+
         setContent {
             DpiControlTheme {
                 val controller = remember { AndroidUnifiedEngineController(applicationContext) }
@@ -99,16 +113,18 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.StartActivityForResult(),
                 ) { result ->
                     if (result.resultCode == Activity.RESULT_OK) {
+                        ProfileEngineBridge.applyActiveSet(applicationContext)
                         scope.launch { controller.startByeDpi() }
                     }
                 }
 
-                DpiControlApp(
+                DpiControlV2App(
                     controller = controller,
                     onByeDpiChange = { enabled ->
                         if (!enabled) {
                             scope.launch { controller.stopByeDpi() }
                         } else {
+                            ProfileEngineBridge.applyActiveSet(applicationContext)
                             val permissionIntent = VpnService.prepare(this@MainActivity)
                             if (permissionIntent == null) {
                                 scope.launch { controller.startByeDpi() }
@@ -134,40 +150,53 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val title: String, val icon: ImageVector) {
     HOME("Главная", Icons.Rounded.Home),
-    STRATEGIES("Стратегии", Icons.Rounded.Tune),
-    DOMAINS("Домены", Icons.Rounded.Language),
+    SETS("Наборы", Icons.Rounded.Tune),
+    PROFILES("Профили", Icons.Rounded.Settings),
+    LISTS("Списки", Icons.Rounded.Language),
     TELEGRAM("Telegram", Icons.Rounded.Send),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DpiControlApp(
+private fun DpiControlV2App(
     controller: AndroidUnifiedEngineController,
     onByeDpiChange: (Boolean) -> Unit,
     onApplyTelegramProxy: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     val state by controller.state.collectAsStateWithLifecycle()
     val byeProfile by ByeDpiController.activeProfile.collectAsStateWithLifecycle()
     val byeNetwork by ByeDpiController.networkLabel.collectAsStateWithLifecycle()
     val byeIpv6 by ByeDpiController.ipv6Active.collectAsStateWithLifecycle()
     val byeError by ByeDpiController.lastError.collectAsStateWithLifecycle()
-    val tgWsPort by TgWsController.activePort.collectAsStateWithLifecycle()
-    val tgWsError by TgWsController.lastError.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
+    val tgPort by TgWsController.activePort.collectAsStateWithLifecycle()
+    val tgError by TgWsController.lastError.collectAsStateWithLifecycle()
 
-    var selectedTabName by rememberSaveable { mutableStateOf(AppTab.HOME.name) }
-    var configRevision by remember { mutableIntStateOf(0) }
-    val config = remember(configRevision) { ByeDpiConfigStore.load(context) }
+    var tabName by rememberSaveable { mutableStateOf(AppTab.HOME.name) }
+    var revision by remember { mutableIntStateOf(0) }
+    val sets = remember(revision) { ProfileStore.loadSets(context) }
+    val lists = remember(revision) { ProfileStore.loadLists(context) }
+    val activeSet = remember(revision) { ProfileStore.activeSet(context) }
+    val config = remember(revision) { ByeDpiConfigStore.load(context) }
     val catalog = remember { ByeDpiStrategyCatalog.load(context) }
-    var testRunning by rememberSaveable { mutableStateOf(false) }
-    var testProgress by rememberSaveable { mutableStateOf<String?>(null) }
+    val compiled = remember(revision) { ProfileCompiler.compile(context, activeSet, config.sni) }
+    val selectedTab = runCatching { AppTab.valueOf(tabName) }.getOrDefault(AppTab.HOME)
+    val canEdit = state.byeDpi == EngineStatus.STOPPED || state.byeDpi == EngineStatus.FAILED
 
-    val selectedTab = runCatching { AppTab.valueOf(selectedTabName) }.getOrDefault(AppTab.HOME)
-    val canConfigure = (state.byeDpi == EngineStatus.STOPPED || state.byeDpi == EngineStatus.FAILED) && !testRunning
+    fun refresh() {
+        revision++
+    }
 
-    fun refreshConfig() {
-        configRevision++
+    fun applyAndRefresh() {
+        ProfileEngineBridge.applyActiveSet(context)
+        refresh()
+    }
+
+    fun saveActiveSet(next: ProfileSetModel) {
+        ProfileStore.saveSet(context, next)
+        ProfileStore.setActiveSet(context, next.id)
+        applyAndRefresh()
     }
 
     Scaffold(
@@ -175,9 +204,9 @@ private fun DpiControlApp(
             TopAppBar(
                 title = {
                     Column {
-                        Text("DPI Control", fontWeight = FontWeight.SemiBold)
+                        Text("DPI Control", fontWeight = FontWeight.Bold)
                         Text(
-                            "ByeDPI · Android",
+                            "${activeSet.name} · ${BuildConfig.VERSION_NAME}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -193,7 +222,7 @@ private fun DpiControlApp(
                 AppTab.entries.forEach { tab ->
                     NavigationBarItem(
                         selected = selectedTab == tab,
-                        onClick = { selectedTabName = tab.name },
+                        onClick = { tabName = tab.name },
                         icon = { Icon(tab.icon, contentDescription = tab.title) },
                         label = { Text(tab.title) },
                     )
@@ -205,93 +234,94 @@ private fun DpiControlApp(
             AppTab.HOME -> HomeScreen(
                 modifier = Modifier.padding(padding),
                 state = state,
+                activeSet = activeSet,
+                compiled = compiled,
                 config = config,
-                activeProfile = byeProfile,
+                activeRuntimeProfile = byeProfile,
                 network = byeNetwork,
                 ipv6 = byeIpv6,
                 error = byeError,
-                onByeDpiChange = onByeDpiChange,
-                onOpenStrategies = { selectedTabName = AppTab.STRATEGIES.name },
-                onOpenDomains = { selectedTabName = AppTab.DOMAINS.name },
+                onToggle = onByeDpiChange,
+                onOpenSets = { tabName = AppTab.SETS.name },
+                onOpenProfiles = { tabName = AppTab.PROFILES.name },
+                onOpenLists = { tabName = AppTab.LISTS.name },
+                onSaveAdvanced = { next ->
+                    ByeDpiConfigStore.save(context, next)
+                    applyAndRefresh()
+                },
+                canEdit = canEdit,
             )
 
-            AppTab.STRATEGIES -> StrategiesScreen(
+            AppTab.SETS -> SetsScreen(
                 modifier = Modifier.padding(padding),
-                config = config,
+                sets = sets,
+                activeSet = activeSet,
+                enabled = canEdit,
+                onSelect = { set ->
+                    ProfileStore.setActiveSet(context, set.id)
+                    applyAndRefresh()
+                },
+                onDuplicate = {
+                    ProfileStore.duplicateActiveSet(context, "Мой набор")
+                    applyAndRefresh()
+                },
+            )
+
+            AppTab.PROFILES -> ProfilesScreen(
+                modifier = Modifier.padding(padding),
+                set = activeSet,
+                lists = lists,
                 catalog = catalog,
-                canConfigure = canConfigure,
-                testRunning = testRunning,
-                testProgress = testProgress,
-                onPreset = { mode ->
-                    ByeDpiController.setMode(context, mode)
-                    testProgress = null
-                    refreshConfig()
+                enabled = canEdit,
+                onSaveProfile = { updated ->
+                    saveActiveSet(
+                        activeSet.copy(
+                            profiles = activeSet.profiles.map { current ->
+                                if (current.id == updated.id) updated else current
+                            },
+                        ),
+                    )
                 },
-                onCatalogStrategy = { strategy, sni ->
-                    ByeDpiConfigStore.setSni(context, sni)
-                    ByeDpiConfigStore.setCatalogStrategy(context, strategy.name, strategy.command)
-                    testProgress = null
-                    refreshConfig()
+                onToggle = { id, enabled ->
+                    saveActiveSet(
+                        activeSet.copy(
+                            profiles = activeSet.profiles.map { profile ->
+                                if (profile.id == id) profile.copy(enabled = enabled) else profile
+                            },
+                        ),
+                    )
                 },
-                onManualStrategy = { command, sni ->
-                    ByeDpiConfigStore.setSni(context, sni)
-                    ByeDpiConfigStore.setManualStrategy(context, command)
-                    testProgress = null
-                    refreshConfig()
-                },
-                onRunTest = {
-                    testRunning = true
-                    testProgress = "Подготовка автотеста…"
-                    scope.launch {
-                        try {
-                            val current = ByeDpiConfigStore.load(context)
-                            val results = ByeDpiStrategyTester.run(
-                                context = context,
-                                strategies = catalog,
-                                sni = current.sni,
-                            ) { index, total, currentResult, best ->
-                                withContext(Dispatchers.Main) {
-                                    testProgress = buildString {
-                                        append("$index/$total · #${currentResult.strategy.index + 1}: ${currentResult.successCount}/${currentResult.totalCount}")
-                                        best?.let {
-                                            append(" · лучшая #${it.strategy.index + 1}: ${it.successCount}/${it.totalCount}")
-                                        }
-                                    }
-                                }
-                            }
-                            val best = results.firstOrNull()
-                            if (best != null && best.successCount > 0) {
-                                val name = "Автотест · стратегия ${best.strategy.index + 1}"
-                                ByeDpiConfigStore.setCatalogStrategy(context, name, best.strategy.command)
-                                refreshConfig()
-                                testProgress = "Готово · стратегия ${best.strategy.index + 1} · ${best.successCount}/${best.totalCount}"
-                            } else {
-                                testProgress = "Ни одна стратегия не прошла TLS-проверку YouTube"
-                            }
-                        } catch (t: Throwable) {
-                            testProgress = "Ошибка: ${t.message ?: t.javaClass.simpleName}"
-                        } finally {
-                            testRunning = false
-                        }
+                onMove = { id, delta ->
+                    val mutable = activeSet.profiles.toMutableList()
+                    val from = mutable.indexOfFirst { it.id == id }
+                    val to = (from + delta).coerceIn(0, mutable.lastIndex)
+                    if (from >= 0 && from != to) {
+                        val item = mutable.removeAt(from)
+                        mutable.add(to, item)
+                        saveActiveSet(activeSet.copy(profiles = mutable))
                     }
                 },
             )
 
-            AppTab.DOMAINS -> DomainsScreen(
+            AppTab.LISTS -> ListsScreen(
                 modifier = Modifier.padding(padding),
-                config = config,
-                canConfigure = canConfigure,
-                onSave = { mode, domains ->
-                    ByeDpiConfigStore.setDomainFilter(context, mode, domains)
-                    refreshConfig()
+                lists = lists,
+                enabled = canEdit,
+                onSave = { list ->
+                    ProfileStore.saveDomainList(context, list)
+                    applyAndRefresh()
+                },
+                onAdd = {
+                    ProfileStore.createDomainList(context, "Мой список")
+                    applyAndRefresh()
                 },
             )
 
             AppTab.TELEGRAM -> TelegramScreen(
                 modifier = Modifier.padding(padding),
                 status = state.tgWs,
-                port = tgWsPort,
-                error = tgWsError,
+                port = tgPort,
+                error = tgError,
                 onToggle = { enabled ->
                     scope.launch {
                         if (enabled) controller.startTgWs() else controller.stopTgWs()
@@ -307,16 +337,34 @@ private fun DpiControlApp(
 private fun HomeScreen(
     modifier: Modifier,
     state: EngineState,
+    activeSet: ProfileSetModel,
+    compiled: io.github.l33kr.networkcontrolcenter.byedpi.profile.CompiledProfileSet,
     config: ByeDpiConfig,
-    activeProfile: String?,
+    activeRuntimeProfile: String?,
     network: String?,
     ipv6: Boolean,
     error: String?,
-    onByeDpiChange: (Boolean) -> Unit,
-    onOpenStrategies: () -> Unit,
-    onOpenDomains: () -> Unit,
+    onToggle: (Boolean) -> Unit,
+    onOpenSets: () -> Unit,
+    onOpenProfiles: () -> Unit,
+    onOpenLists: () -> Unit,
+    onSaveAdvanced: (ByeDpiConfig) -> Unit,
+    canEdit: Boolean,
 ) {
     val running = state.byeDpi == EngineStatus.RUNNING || state.byeDpi == EngineStatus.STARTING
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
+
+    if (showAdvanced) {
+        AdvancedSettingsDialog(
+            config = config,
+            enabled = canEdit,
+            onDismiss = { showAdvanced = false },
+            onSave = {
+                onSaveAdvanced(it)
+                showAdvanced = false
+            },
+        )
+    }
 
     Column(
         modifier = modifier
@@ -327,31 +375,33 @@ private fun HomeScreen(
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (state.byeDpi == EngineStatus.RUNNING) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surface
+                },
+            ),
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (state.byeDpi == EngineStatus.RUNNING) {
-                            MaterialTheme.colorScheme.secondaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        },
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
                     ) {
                         Icon(
                             imageVector = if (running) Icons.Rounded.CheckCircle else Icons.Rounded.PowerSettingsNew,
                             contentDescription = null,
-                            modifier = Modifier.padding(12.dp),
+                            modifier = Modifier.padding(14.dp),
                         )
                     }
                     Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Защищённый маршрут", style = MaterialTheme.typography.titleLarge)
+                        Text("Обход DPI", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                         Text(
                             statusLabel(state.byeDpi),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -365,11 +415,11 @@ private fun HomeScreen(
 
                 if (state.byeDpi == EngineStatus.RUNNING) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        InfoPill(activeProfile ?: "ByeDPI")
+                        InfoPill(activeRuntimeProfile ?: activeSet.name)
                         network?.let { InfoPill(it) }
                     }
                     Text(
-                        if (ipv6) "Маршрутизация: IPv4 + IPv6" else "Маршрутизация: IPv4",
+                        if (ipv6) "Маршрут: IPv4 + IPv6" else "Маршрут: IPv4",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -382,7 +432,7 @@ private fun HomeScreen(
                 Button(
                     modifier = Modifier.fillMaxWidth(),
                     enabled = state.byeDpi != EngineStatus.STARTING && state.byeDpi != EngineStatus.STOPPING,
-                    onClick = { onByeDpiChange(!running) },
+                    onClick = { onToggle(!running) },
                 ) {
                     Icon(
                         if (running) Icons.Rounded.PowerSettingsNew else Icons.Rounded.PlayArrow,
@@ -394,52 +444,137 @@ private fun HomeScreen(
             }
         }
 
-        SectionTitle("Текущая конфигурация")
-        SettingsRow(
-            title = "Стратегия",
-            value = config.strategyName ?: strategyModeTitle(config.mode),
-            onClick = onOpenStrategies,
-        )
-        SettingsRow(
-            title = "Домены",
-            value = domainModeTitle(config.domainFilterMode, config.normalizedDomains().size),
-            onClick = onOpenDomains,
-        )
-        SettingsRow(
-            title = "DNS / IPv6",
-            value = "${config.dns} · ${config.ipv6Mode.name}",
-            onClick = null,
-        )
+        SectionTitle("Активный набор")
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp),
+            onClick = onOpenSets,
+        ) {
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(activeSet.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(activeSet.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    InfoPill("${compiled.enabledProfiles} профилей")
+                    InfoPill("${compiled.bypassProfiles} bypass")
+                    InfoPill("${compiled.passProfiles} pass")
+                }
+            }
+        }
+
+        SectionTitle("Маршрутизация")
+        activeSet.profiles.filter { it.enabled }.take(5).forEachIndexed { index, profile ->
+            RoutePreviewRow(index + 1, profile)
+        }
+        if (activeSet.profiles.count { it.enabled } > 5) {
+            Text(
+                "+ ещё ${activeSet.profiles.count { it.enabled } - 5}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            FilledTonalButton(modifier = Modifier.weight(1f), onClick = onOpenProfiles) {
+                Text("Профили")
+            }
+            FilledTonalButton(modifier = Modifier.weight(1f), onClick = onOpenLists) {
+                Text("Списки")
+            }
+        }
+        OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { showAdvanced = true }) {
+            Icon(Icons.Rounded.Settings, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("DNS, IPv6 и Fake SNI")
+        }
     }
 }
 
 @Composable
-private fun StrategiesScreen(
+private fun SetsScreen(
     modifier: Modifier,
-    config: ByeDpiConfig,
-    catalog: List<CatalogStrategy>,
-    canConfigure: Boolean,
-    testRunning: Boolean,
-    testProgress: String?,
-    onPreset: (ByeDpiMode) -> Unit,
-    onCatalogStrategy: (CatalogStrategy, String) -> Unit,
-    onManualStrategy: (String, String) -> Unit,
-    onRunTest: () -> Unit,
+    sets: List<ProfileSetModel>,
+    activeSet: ProfileSetModel,
+    enabled: Boolean,
+    onSelect: (ProfileSetModel) -> Unit,
+    onDuplicate: () -> Unit,
 ) {
-    var showCatalog by rememberSaveable { mutableStateOf(false) }
-    var manualCommand by rememberSaveable(config.command) { mutableStateOf(config.command) }
-    var sni by rememberSaveable(config.sni) { mutableStateOf(config.sni) }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionTitle("Наборы")
+        Text(
+            "Набор определяет порядок профилей. Первый совпавший профиль решает, применять обход или пропустить трафик без desync.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
-    if (showCatalog) {
-        StrategyCatalogDialog(
+        sets.forEach { set ->
+            val selected = set.id == activeSet.id
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled,
+                onClick = { onSelect(set) },
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                ),
+            ) {
+                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(set.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(set.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (selected) Icon(Icons.Rounded.CheckCircle, contentDescription = "Активен")
+                    }
+                    Text(
+                        "${set.profiles.count { it.enabled }} активных профилей",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        }
+
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            enabled = enabled,
+            onClick = onDuplicate,
+        ) {
+            Icon(Icons.Rounded.Add, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Сделать редактируемую копию")
+        }
+
+        if (!enabled) DisabledHint()
+    }
+}
+
+@Composable
+private fun ProfilesScreen(
+    modifier: Modifier,
+    set: ProfileSetModel,
+    lists: List<DomainListModel>,
+    catalog: List<CatalogStrategy>,
+    enabled: Boolean,
+    onSaveProfile: (TrafficProfile) -> Unit,
+    onToggle: (String, Boolean) -> Unit,
+    onMove: (String, Int) -> Unit,
+) {
+    var editing by remember { mutableStateOf<TrafficProfile?>(null) }
+
+    editing?.let { profile ->
+        ProfileEditorDialog(
+            profile = profile,
+            lists = lists,
             catalog = catalog,
-            initialSni = sni,
-            enabled = canConfigure,
-            onDismiss = { showCatalog = false },
-            onSelect = { strategy, selectedSni ->
-                sni = selectedSni
-                onCatalogStrategy(strategy, selectedSni)
-                showCatalog = false
+            enabled = enabled,
+            onDismiss = { editing = null },
+            onSave = {
+                onSaveProfile(it)
+                editing = null
             },
         )
     }
@@ -449,178 +584,134 @@ private fun StrategiesScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SectionTitle("Стратегии ByeDPI")
+        SectionTitle("${set.name} · профили")
         Text(
-            "Выбери готовый вариант как в zapret/ByeDPI или вставь собственную команду. Для смены стратегии VPN должен быть выключен.",
+            "Порядок важен: сверху находятся более точные правила, внизу — общий PASS.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
         )
 
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Сейчас выбрано", style = MaterialTheme.typography.labelMedium)
-                Text(
-                    config.strategyName ?: strategyModeTitle(config.mode),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
+        set.profiles.forEachIndexed { index, profile ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                onClick = { if (enabled) editing = profile },
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${index + 1}",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(profile.name, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                profileSummary(profile, lists),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Switch(
+                            checked = profile.enabled,
+                            enabled = enabled,
+                            onCheckedChange = { onToggle(profile.id, it) },
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        InfoPill(if (profile.action == ProfileAction.PASS) "PASS" else "BYPASS")
+                        Spacer(Modifier.width(6.dp))
+                        InfoPill(protocolTitle(profile.protocol))
+                        Spacer(Modifier.weight(1f))
+                        IconButton(enabled = enabled && index > 0, onClick = { onMove(profile.id, -1) }) {
+                            Icon(Icons.Rounded.ArrowUpward, contentDescription = "Выше")
+                        }
+                        IconButton(enabled = enabled && index < set.profiles.lastIndex, onClick = { onMove(profile.id, 1) }) {
+                            Icon(Icons.Rounded.ArrowDownward, contentDescription = "Ниже")
+                        }
+                        IconButton(enabled = enabled, onClick = { editing = profile }) {
+                            Icon(Icons.Rounded.Edit, contentDescription = "Редактировать")
+                        }
+                    }
+                }
             }
         }
 
-        Button(
-            modifier = Modifier.fillMaxWidth(),
-            enabled = canConfigure,
-            onClick = { showCatalog = true },
-        ) {
-            Icon(Icons.Rounded.Search, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("Каталог готовых стратегий · ${catalog.size}")
-        }
-
-        FilledTonalButton(
-            modifier = Modifier.fillMaxWidth(),
-            enabled = canConfigure,
-            onClick = onRunTest,
-        ) {
-            Icon(Icons.Rounded.PlayArrow, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(if (testRunning) "Идёт тест…" else "Автотест YouTube")
-        }
-        testProgress?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        SectionTitle("Быстрые профили")
-        ByeDpiStrategies.selectable
-            .filter { it.mode != ByeDpiMode.MANUAL }
-            .forEach { preset ->
-                val selected = config.strategyName == null && config.mode == preset.mode
-                StrategyPresetCard(
-                    title = preset.title,
-                    description = preset.description,
-                    selected = selected,
-                    enabled = canConfigure,
-                    onClick = { onPreset(preset.mode) },
-                )
-            }
-
-        SectionTitle("Ручная команда")
-        OutlinedTextField(
-            modifier = Modifier.fillMaxWidth(),
-            value = sni,
-            enabled = canConfigure,
-            onValueChange = { sni = it },
-            label = { Text("Fake SNI") },
-            singleLine = true,
-        )
-        OutlinedTextField(
-            modifier = Modifier.fillMaxWidth(),
-            value = manualCommand,
-            enabled = canConfigure,
-            onValueChange = { manualCommand = it },
-            label = { Text("Аргументы ByeDPI") },
-            minLines = 5,
-            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        )
-        OutlinedButton(
-            modifier = Modifier.fillMaxWidth(),
-            enabled = canConfigure && manualCommand.isNotBlank(),
-            onClick = { onManualStrategy(manualCommand, sni) },
-        ) {
-            Text("Сохранить ручную стратегию")
-        }
+        if (!enabled) DisabledHint()
     }
 }
 
 @Composable
-private fun DomainsScreen(
+private fun ListsScreen(
     modifier: Modifier,
-    config: ByeDpiConfig,
-    canConfigure: Boolean,
-    onSave: (DomainFilterMode, String) -> Unit,
+    lists: List<DomainListModel>,
+    enabled: Boolean,
+    onSave: (DomainListModel) -> Unit,
+    onAdd: () -> Unit,
 ) {
-    var modeName by rememberSaveable(config.domainFilterMode.name) {
-        mutableStateOf(config.domainFilterMode.name)
+    var editing by remember { mutableStateOf<DomainListModel?>(null) }
+
+    editing?.let { list ->
+        DomainListEditorDialog(
+            list = list,
+            enabled = enabled,
+            onDismiss = { editing = null },
+            onSave = {
+                onSave(it)
+                editing = null
+            },
+        )
     }
-    var domains by rememberSaveable(config.domains) { mutableStateOf(config.domains) }
-    val mode = runCatching { DomainFilterMode.valueOf(modeName) }.getOrDefault(DomainFilterMode.ALL)
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SectionTitle("Фильтрация по доменам")
+        SectionTitle("Доменные списки")
         Text(
-            "Аналог hostlist/exclude-list: можно обрабатывать весь трафик, только свой список или всё кроме списка исключений.",
+            "Один список можно подключить к нескольким профилям. Изменение списка автоматически меняет все использующие его правила.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        DomainModeCard(
-            title = "Весь трафик",
-            description = "Стратегия применяется без ограничения по доменам",
-            selected = mode == DomainFilterMode.ALL,
-            enabled = canConfigure,
-            onClick = { modeName = DomainFilterMode.ALL.name },
-        )
-        DomainModeCard(
-            title = "Только указанные",
-            description = "ByeDPI обрабатывает только домены из списка ниже",
-            selected = mode == DomainFilterMode.ONLY_LISTED,
-            enabled = canConfigure,
-            onClick = { modeName = DomainFilterMode.ONLY_LISTED.name },
-        )
-        DomainModeCard(
-            title = "Игнорировать указанные",
-            description = "Эти домены идут без desync, остальные — через выбранную стратегию",
-            selected = mode == DomainFilterMode.EXCLUDE_LISTED,
-            enabled = canConfigure,
-            onClick = { modeName = DomainFilterMode.EXCLUDE_LISTED.name },
-        )
-
-        SectionTitle("Быстро добавить")
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(DomainPresets.all, key = { it.title }) { preset ->
-                OutlinedButton(
-                    enabled = canConfigure,
-                    onClick = { domains = DomainPresets.merge(domains, preset) },
+        lists.forEach { list ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled,
+                onClick = { editing = list },
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("+ ${preset.title}")
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(list.name, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${list.domains.size} доменов",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.Rounded.Edit, contentDescription = null)
                 }
             }
         }
 
-        OutlinedTextField(
-            modifier = Modifier.fillMaxWidth(),
-            value = domains,
-            enabled = canConfigure && mode != DomainFilterMode.ALL,
-            onValueChange = { domains = it },
-            label = { Text("Домены") },
-            placeholder = { Text("youtube.com\ngooglevideo.com\ndiscord.com") },
-            supportingText = { Text("Один домен на строку. Поддомены учитываются ядром ByeDPI.") },
-            minLines = 9,
-            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-        )
-
-        Button(
-            modifier = Modifier.fillMaxWidth(),
-            enabled = canConfigure,
-            onClick = { onSave(mode, domains) },
-        ) {
-            Text("Сохранить список")
+        OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = enabled, onClick = onAdd) {
+            Icon(Icons.Rounded.Add, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Новый список")
         }
 
-        if (!canConfigure) {
-            Text(
-                "Чтобы изменить фильтрацию, сначала отключи ByeDPI.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
+        if (!enabled) DisabledHint()
     }
 }
 
@@ -643,14 +734,14 @@ private fun TelegramScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         SectionTitle("Telegram WS Proxy")
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(statusLabel(status), style = MaterialTheme.typography.titleMedium)
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
+                Text(statusLabel(status), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Text(
                     if (status == EngineStatus.RUNNING && port > 0) {
                         "127.0.0.1:$port · MTProto → WSS"
                     } else {
-                        "Локальный MTProto через WebSocket-маршрут"
+                        "Отдельный локальный Telegram-прокси. Может работать независимо от ByeDPI."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -680,15 +771,151 @@ private fun TelegramScreen(
 }
 
 @Composable
-private fun StrategyCatalogDialog(
+private fun ProfileEditorDialog(
+    profile: TrafficProfile,
+    lists: List<DomainListModel>,
     catalog: List<CatalogStrategy>,
-    initialSni: String,
     enabled: Boolean,
     onDismiss: () -> Unit,
-    onSelect: (CatalogStrategy, String) -> Unit,
+    onSave: (TrafficProfile) -> Unit,
+) {
+    var name by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
+    var actionName by rememberSaveable(profile.id) { mutableStateOf(profile.action.name) }
+    var protocolName by rememberSaveable(profile.id) { mutableStateOf(profile.protocol.name) }
+    var selectedLists by remember(profile.id) { mutableStateOf(profile.domainListIds.toSet()) }
+    var strategyName by rememberSaveable(profile.id) { mutableStateOf(profile.strategyName ?: "ByeByeDPI Default") }
+    var strategyCommand by rememberSaveable(profile.id) { mutableStateOf(profile.strategyCommand ?: ByeDpiStrategies.BALANCED.command) }
+    var showCatalog by rememberSaveable { mutableStateOf(false) }
+
+    val action = runCatching { ProfileAction.valueOf(actionName) }.getOrDefault(ProfileAction.BYPASS)
+    val protocol = runCatching { ProfileProtocol.valueOf(protocolName) }.getOrDefault(ProfileProtocol.ANY)
+
+    if (showCatalog) {
+        StrategyPickerDialog(
+            catalog = catalog,
+            onDismiss = { showCatalog = false },
+            onSelect = { item ->
+                strategyName = item.name
+                strategyCommand = item.command
+                showCatalog = false
+            },
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Редактировать профиль") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = name,
+                    enabled = enabled,
+                    onValueChange = { name = it },
+                    label = { Text("Название") },
+                    singleLine = true,
+                )
+
+                Text("Действие", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = action == ProfileAction.BYPASS,
+                        enabled = enabled,
+                        onClick = { actionName = ProfileAction.BYPASS.name },
+                        label = { Text("BYPASS") },
+                    )
+                    FilterChip(
+                        selected = action == ProfileAction.PASS,
+                        enabled = enabled,
+                        onClick = { actionName = ProfileAction.PASS.name },
+                        label = { Text("PASS") },
+                    )
+                }
+
+                Text("Протокол", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ProfileProtocol.entries.forEach { item ->
+                        FilterChip(
+                            selected = protocol == item,
+                            enabled = enabled,
+                            onClick = { protocolName = item.name },
+                            label = { Text(protocolTitle(item)) },
+                        )
+                    }
+                }
+
+                Text("Списки", style = MaterialTheme.typography.labelLarge)
+                lists.forEach { list ->
+                    FilterChip(
+                        selected = list.id in selectedLists,
+                        enabled = enabled,
+                        onClick = {
+                            selectedLists = if (list.id in selectedLists) {
+                                selectedLists - list.id
+                            } else {
+                                selectedLists + list.id
+                            }
+                        },
+                        label = { Text("${list.name} · ${list.domains.size}") },
+                    )
+                }
+
+                if (action == ProfileAction.BYPASS) {
+                    HorizontalDivider()
+                    Text("Стратегия", style = MaterialTheme.typography.labelLarge)
+                    Text(strategyName, fontWeight = FontWeight.SemiBold)
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = enabled,
+                        onClick = { showCatalog = true },
+                    ) {
+                        Icon(Icons.Rounded.Search, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Выбрать из каталога")
+                    }
+                    OutlinedTextField(
+                        modifier = Modifier.fillMaxWidth(),
+                        value = strategyCommand,
+                        enabled = enabled,
+                        onValueChange = { strategyCommand = it },
+                        label = { Text("Аргументы ByeDPI") },
+                        minLines = 3,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = enabled && name.isNotBlank(),
+                onClick = {
+                    onSave(
+                        profile.copy(
+                            name = name.trim(),
+                            action = action,
+                            protocol = protocol,
+                            domainListIds = selectedLists.toList(),
+                            strategyName = if (action == ProfileAction.BYPASS) strategyName else null,
+                            strategyCommand = if (action == ProfileAction.BYPASS) strategyCommand else null,
+                        ),
+                    )
+                },
+            ) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
+}
+
+@Composable
+private fun StrategyPickerDialog(
+    catalog: List<CatalogStrategy>,
+    onDismiss: () -> Unit,
+    onSelect: (CatalogStrategy) -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
-    var sni by rememberSaveable(initialSni) { mutableStateOf(initialSni) }
     val filtered = remember(query, catalog) {
         val q = query.trim().lowercase()
         if (q.isBlank()) catalog else catalog.filter {
@@ -698,46 +925,31 @@ private fun StrategyCatalogDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Готовые стратегии") },
+        title = { Text("Каталог стратегий") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
                     value = query,
                     onValueChange = { query = it },
-                    label = { Text("Поиск") },
                     leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    label = { Text("Поиск") },
                     singleLine = true,
-                )
-                OutlinedTextField(
-                    modifier = Modifier.fillMaxWidth(),
-                    value = sni,
-                    onValueChange = { sni = it },
-                    label = { Text("Fake SNI") },
-                    singleLine = true,
-                )
-                Text(
-                    "Найдено: ${filtered.size}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 LazyColumn(
                     modifier = Modifier.heightIn(max = 430.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(filtered, key = { it.index }) { strategy ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = { if (enabled) onSelect(strategy, sni.trim().ifBlank { "google.com" }) },
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Card(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(strategy) }) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(strategy.name, fontWeight = FontWeight.SemiBold)
                                 Text(
                                     strategy.command,
-                                    maxLines = 3,
-                                    overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -745,134 +957,200 @@ private fun StrategyCatalogDialog(
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Закрыть") }
-        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } },
     )
 }
 
 @Composable
-private fun StrategyPresetCard(
-    title: String,
-    description: String,
-    selected: Boolean,
+private fun DomainListEditorDialog(
+    list: DomainListModel,
     enabled: Boolean,
-    onClick: () -> Unit,
+    onDismiss: () -> Unit,
+    onSave: (DomainListModel) -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        enabled = enabled,
-        onClick = onClick,
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-        ),
-    ) {
-        Row(
-            modifier = Modifier.padding(15.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.SemiBold)
-                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var name by rememberSaveable(list.id) { mutableStateOf(list.name) }
+    var domains by rememberSaveable(list.id) { mutableStateOf(list.domains.joinToString("\n")) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Доменный список") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = name,
+                    enabled = enabled,
+                    onValueChange = { name = it },
+                    label = { Text("Название") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = domains,
+                    enabled = enabled,
+                    onValueChange = { domains = it },
+                    label = { Text("Домены") },
+                    placeholder = { Text("youtube.com\ngooglevideo.com") },
+                    supportingText = { Text("Один домен на строку или через пробел/запятую") },
+                    minLines = 10,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                )
             }
-            if (selected) Icon(Icons.Rounded.CheckCircle, contentDescription = "Выбрано")
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = enabled && name.isNotBlank(),
+                onClick = {
+                    onSave(
+                        list.copy(
+                            name = name.trim(),
+                            domains = domains.lineSequence().toList(),
+                        ),
+                    )
+                },
+            ) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
 }
 
 @Composable
-private fun DomainModeCard(
-    title: String,
-    description: String,
-    selected: Boolean,
+private fun AdvancedSettingsDialog(
+    config: ByeDpiConfig,
     enabled: Boolean,
-    onClick: () -> Unit,
+    onDismiss: () -> Unit,
+    onSave: (ByeDpiConfig) -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        enabled = enabled,
-        onClick = onClick,
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-        ),
-    ) {
-        Row(
-            modifier = Modifier.padding(15.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.SemiBold)
-                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var dns by rememberSaveable { mutableStateOf(config.dns) }
+    var sni by rememberSaveable { mutableStateOf(config.sni) }
+    var ipv6Name by rememberSaveable { mutableStateOf(config.ipv6Mode.name) }
+    val ipv6 = runCatching { Ipv6Mode.valueOf(ipv6Name) }.getOrDefault(Ipv6Mode.AUTO)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Сетевые настройки") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = dns,
+                    enabled = enabled,
+                    onValueChange = { dns = it },
+                    label = { Text("DNS") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = sni,
+                    enabled = enabled,
+                    onValueChange = { sni = it },
+                    label = { Text("Fake SNI") },
+                    singleLine = true,
+                )
+                Text("IPv6", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Ipv6Mode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = ipv6 == mode,
+                            enabled = enabled,
+                            onClick = { ipv6Name = mode.name },
+                            label = { Text(mode.name) },
+                        )
+                    }
+                }
             }
-            if (selected) Icon(Icons.Rounded.CheckCircle, contentDescription = "Выбрано")
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = enabled,
+                onClick = {
+                    onSave(
+                        config.copy(
+                            dns = dns.trim(),
+                            sni = sni.trim().ifBlank { "google.com" },
+                            ipv6Mode = ipv6,
+                        ),
+                    )
+                },
+            ) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
 }
 
 @Composable
-private fun SettingsRow(title: String, value: String, onClick: (() -> Unit)?) {
-    Card(
+private fun RoutePreviewRow(index: Int, profile: TrafficProfile) {
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        enabled = onClick != null,
-        onClick = { onClick?.invoke() },
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(3.dp))
-                Text(value, fontWeight = FontWeight.Medium)
-            }
-            if (onClick != null) Text("›", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            index.toString().padStart(2, '0'),
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(profile.name, fontWeight = FontWeight.Medium)
+            Text(
+                if (profile.action == ProfileAction.PASS) "Без desync" else (profile.strategyName ?: "ByeDPI"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
+        InfoPill(if (profile.action == ProfileAction.PASS) "PASS" else "BYPASS")
     }
 }
 
 @Composable
 private fun InfoPill(text: String) {
     Surface(
-        shape = RoundedCornerShape(50),
+        shape = RoundedCornerShape(100.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
         Text(
             text,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            style = MaterialTheme.typography.labelSmall,
         )
     }
 }
 
 @Composable
 private fun SectionTitle(text: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+    Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+}
+
+@Composable
+private fun DisabledHint() {
+    Text(
+        "Для изменения конфигурации сначала отключи ByeDPI.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private fun profileSummary(profile: TrafficProfile, lists: List<DomainListModel>): String {
+    val byId = lists.associateBy { it.id }
+    val listText = if (profile.domainListIds.isEmpty()) {
+        "любой трафик"
+    } else {
+        profile.domainListIds.mapNotNull { byId[it]?.name }.joinToString(" + ").ifBlank { "без списка" }
     }
+    val action = if (profile.action == ProfileAction.PASS) "PASS" else (profile.strategyName ?: "BYPASS")
+    return "$listText · ${protocolTitle(profile.protocol)} · $action"
+}
+
+private fun protocolTitle(protocol: ProfileProtocol): String = when (protocol) {
+    ProfileProtocol.ANY -> "ANY"
+    ProfileProtocol.TCP_TLS -> "TLS/TCP"
+    ProfileProtocol.UDP_QUIC -> "QUIC/UDP"
 }
 
 private fun statusLabel(status: EngineStatus): String = when (status) {
-    EngineStatus.STOPPED -> "Отключено"
+    EngineStatus.STOPPED -> "Выключено"
     EngineStatus.STARTING -> "Запуск…"
     EngineStatus.RUNNING -> "Работает"
     EngineStatus.STOPPING -> "Остановка…"
     EngineStatus.FAILED -> "Ошибка"
-}
-
-private fun strategyModeTitle(mode: ByeDpiMode): String = when (mode) {
-    ByeDpiMode.AUTO -> "Auto"
-    ByeDpiMode.MOBILE_RU -> "Mobile RU"
-    ByeDpiMode.BALANCED -> "ByeByeDPI Default"
-    ByeDpiMode.STRONG_FAKE -> "Strong / Fake"
-    ByeDpiMode.MANUAL -> "Ручная стратегия"
-}
-
-private fun domainModeTitle(mode: DomainFilterMode, count: Int): String = when (mode) {
-    DomainFilterMode.ALL -> "Весь трафик"
-    DomainFilterMode.ONLY_LISTED -> "Только список · $count"
-    DomainFilterMode.EXCLUDE_LISTED -> "Исключения · $count"
 }
