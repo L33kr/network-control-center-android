@@ -82,7 +82,13 @@ class TgWsProxyService : Service() {
                 TgWsNative.setPoolSize(config.poolSize)
                 TgWsNative.setCloudflareCacheDir(cacheDir.absolutePath)
                 TgWsNative.setCloudflare(config.cloudflareEnabled, config.cloudflareDomain)
-                TgWsNative.setWorkerDomains(config.workerDomains)
+
+                if (!TgWsNative.trySetWorkerDomains(config.workerDomains)) {
+                    Log.w(
+                        TAG,
+                        "This bundled libtgwsproxy.so does not export SetCfWorkerDomains; continuing without Worker domains",
+                    )
+                }
 
                 val result = TgWsNative.start(
                     host = config.bindIp,
@@ -135,13 +141,10 @@ class TgWsProxyService : Service() {
     private fun selectPort(host: String, preferredPort: Int): Int? {
         if (isPortAvailable(host, preferredPort)) return preferredPort
 
-        // Keep the selected port predictable for the Telegram deep link, while
-        // avoiding collisions with a separately installed TG WS proxy.
         for (port in (preferredPort + 1)..(preferredPort + 20).coerceAtMost(65535)) {
             if (isPortAvailable(host, port)) return port
         }
 
-        // Last resort: ask the OS for an ephemeral loopback port.
         return runCatching {
             ServerSocket().use { socket ->
                 socket.reuseAddress = false
