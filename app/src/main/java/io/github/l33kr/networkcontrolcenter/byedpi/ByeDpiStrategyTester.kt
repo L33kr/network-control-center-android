@@ -80,10 +80,10 @@ object ByeDpiStrategyTester {
             }
 
             results += result
-            val best = results.maxWithOrNull(
-                compareBy<StrategyTestResult> { it.successCount }
-                    .thenByDescending { it.strategy.index },
-            )
+            val best = results.sortedWith(
+                compareByDescending<StrategyTestResult> { it.successCount }
+                    .thenBy { it.strategy.index },
+            ).firstOrNull()
             onProgress(index + 1, strategies.size, result, best)
             delay(150)
         }
@@ -116,8 +116,8 @@ object ByeDpiStrategyTester {
         raw.soTimeout = 3000
         raw.connect(InetSocketAddress.createUnresolved(host, 443), 3000)
 
-        val ssl = SSLSocketFactory.getDefault()
-            .createSocket(raw, host, 443, true) as SSLSocket
+        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+        val ssl = factory.createSocket(raw, host, 443, true) as SSLSocket
         ssl.soTimeout = 3000
         ssl.sslParameters = ssl.sslParameters.apply {
             serverNames = listOf(SNIHostName(host))
