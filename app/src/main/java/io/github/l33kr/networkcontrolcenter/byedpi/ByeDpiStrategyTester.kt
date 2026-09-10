@@ -49,6 +49,10 @@ object ByeDpiStrategyTester {
                 command = strategy.command,
                 strategyName = strategy.name,
                 sni = sni,
+                // Measure the strategy itself. A user's include/exclude list is applied
+                // only when the real VPN starts and must not skew YouTube test results.
+                domainFilterMode = DomainFilterMode.ALL,
+                domains = "",
             )
 
             val result = coroutineScope {
