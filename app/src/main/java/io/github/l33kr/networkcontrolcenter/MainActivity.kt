@@ -19,13 +19,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -33,6 +37,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
+import io.github.l33kr.networkcontrolcenter.ui.SettingsScreen
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -44,6 +49,7 @@ class MainActivity : ComponentActivity() {
                     AndroidUnifiedEngineController(applicationContext)
                 }
                 val scope = rememberCoroutineScope()
+                var showSettings by rememberSaveable { mutableStateOf(false) }
                 val vpnPermissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.StartActivityForResult(),
                 ) { result ->
@@ -52,31 +58,39 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                NetworkControlCenterScreen(
-                    controller = controller,
-                    onByeDpiChange = { enabled ->
-                        if (!enabled) {
-                            scope.launch { controller.stopByeDpi() }
-                        } else {
-                            val permissionIntent = VpnService.prepare(this@MainActivity)
-                            if (permissionIntent == null) {
-                                scope.launch { controller.startByeDpi() }
+                if (showSettings) {
+                    SettingsScreen(
+                        context = applicationContext,
+                        onBack = { showSettings = false },
+                    )
+                } else {
+                    NetworkControlCenterScreen(
+                        controller = controller,
+                        onOpenSettings = { showSettings = true },
+                        onByeDpiChange = { enabled ->
+                            if (!enabled) {
+                                scope.launch { controller.stopByeDpi() }
                             } else {
-                                vpnPermissionLauncher.launch(permissionIntent)
+                                val permissionIntent = VpnService.prepare(this@MainActivity)
+                                if (permissionIntent == null) {
+                                    scope.launch { controller.startByeDpi() }
+                                } else {
+                                    vpnPermissionLauncher.launch(permissionIntent)
+                                }
                             }
-                        }
-                    },
-                    onApplyTelegramProxy = {
-                        val opened = TgWsController.openTelegramProxy(applicationContext)
-                        if (!opened) {
-                            Toast.makeText(
-                                this,
-                                "Не удалось открыть Telegram-клиент",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        }
-                    },
-                )
+                        },
+                        onApplyTelegramProxy = {
+                            val opened = TgWsController.openTelegramProxy(applicationContext)
+                            if (!opened) {
+                                Toast.makeText(
+                                    this,
+                                    "Не удалось открыть Telegram-клиент",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        },
+                    )
+                }
             }
         }
     }
@@ -85,6 +99,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun NetworkControlCenterScreen(
     controller: AndroidUnifiedEngineController,
+    onOpenSettings: () -> Unit,
     onByeDpiChange: (Boolean) -> Unit,
     onApplyTelegramProxy: () -> Unit,
 ) {
@@ -133,6 +148,13 @@ private fun NetworkControlCenterScreen(
                 onClick = onApplyTelegramProxy,
             ) {
                 Text("Применить прокси в Telegram")
+            }
+
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onOpenSettings,
+            ) {
+                Text("Настройки движков")
             }
 
             Spacer(Modifier.height(4.dp))
