@@ -7,13 +7,14 @@ plugins {
 android {
     namespace = "io.github.l33kr.networkcontrolcenter"
     compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "io.github.l33kr.networkcontrolcenter"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-dev"
+        versionCode = 3
+        versionName = "0.3.0-dev"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -34,9 +35,18 @@ android {
         buildConfig = true
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     sourceSets.getByName("main") {
-        // Populated by scripts/bootstrap-* or the CI checkout step.
+        // Pinned TG WS libraries are provided by bootstrap scripts / CI checkout.
         jniLibs.srcDir("${rootDir}/third_party/tg-ws-proxy-android/app/src/main/jniLibs")
+        // Current hev-socks5-tunnel is compiled by buildHevSocks5Tunnel.
+        jniLibs.srcDir(layout.buildDirectory.dir("generated/hevJniLibs"))
     }
 
     packaging {
@@ -44,6 +54,51 @@ android {
             useLegacyPackaging = false
         }
     }
+}
+
+val hevSourceDir = rootProject.file("third_party/hev-socks5-tunnel")
+val hevJniLibsDir = layout.buildDirectory.dir("generated/hevJniLibs")
+val hevObjDir = layout.buildDirectory.dir("intermediates/hevNdk/obj")
+val hevProjectDir = layout.buildDirectory.dir("intermediates/hevNdk/project")
+
+val buildHevSocks5Tunnel by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Build the pinned hev-socks5-tunnel shared library with Android NDK"
+
+    inputs.dir(hevSourceDir)
+    inputs.file(file("src/main/jni/Application.mk"))
+    outputs.dir(hevJniLibsDir)
+
+    doFirst {
+        check(hevSourceDir.resolve("Android.mk").exists()) {
+            "hev-socks5-tunnel sources are missing. Run scripts/bootstrap-byedpi.* first."
+        }
+        hevJniLibsDir.get().asFile.mkdirs()
+        hevObjDir.get().asFile.mkdirs()
+        hevProjectDir.get().asFile.mkdirs()
+
+        val ndkBuild = android.ndkDirectory.resolve(
+            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+                "ndk-build.cmd"
+            } else {
+                "ndk-build"
+            }
+        )
+
+        commandLine(
+            ndkBuild.absolutePath,
+            "NDK_PROJECT_PATH=${hevProjectDir.get().asFile.absolutePath}",
+            "NDK_OUT=${hevObjDir.get().asFile.absolutePath}",
+            "NDK_LIBS_OUT=${hevJniLibsDir.get().asFile.absolutePath}",
+            "APP_BUILD_SCRIPT=${hevSourceDir.resolve("Android.mk").absolutePath}",
+            "NDK_APPLICATION_MK=${file("src/main/jni/Application.mk").absolutePath}",
+            "APP_MODULES=hev-socks5-tunnel",
+        )
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildHevSocks5Tunnel)
 }
 
 dependencies {
