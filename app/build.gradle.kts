@@ -80,38 +80,36 @@ val buildHevSocks5Tunnel by tasks.registering(Exec::class) {
                 "ndk-build.cmd"
             } else {
                 "ndk-build"
-            },
+            }
         )
+
         commandLine(
             ndkBuild.absolutePath,
-            "-C",
-            hevSourceDir.absolutePath,
-            "-j${Runtime.getRuntime().availableProcessors().coerceAtLeast(1)}",
-            "APP_BUILD_SCRIPT=${hevSourceDir.resolve("Android.mk").absolutePath}",
-            "NDK_APPLICATION_MK=${project.file("src/main/jni/Application.mk").absolutePath}",
-            "NDK_LIBS_OUT=${hevJniLibsDir.get().asFile.absolutePath}",
+            "NDK_PROJECT_PATH=${hevProjectDir.get().asFile.absolutePath}",
             "NDK_OUT=${hevObjDir.get().asFile.absolutePath}",
+            "NDK_LIBS_OUT=${hevJniLibsDir.get().asFile.absolutePath}",
+            "APP_BUILD_SCRIPT=${hevSourceDir.resolve("Android.mk").absolutePath}",
+            "NDK_APPLICATION_MK=${file("src/main/jni/Application.mk").absolutePath}",
+            "APP_MODULES=hev-socks5-tunnel",
         )
     }
 }
 
-tasks.configureEach {
-    if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
-        dependsOn(buildHevSocks5Tunnel)
-    }
+tasks.named("preBuild").configure {
+    dependsOn(buildHevSocks5Tunnel)
 }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.compose.ui:ui:1.7.8")
-    implementation("androidx.compose.ui:ui-tooling-preview:1.7.8")
-    implementation("androidx.compose.material3:material3:1.3.1")
-    implementation("androidx.compose.material:material-icons-extended:1.7.8")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation(platform("androidx.compose:compose-bom:2025.02.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
-    debugImplementation("androidx.compose.ui:ui-tooling:1.7.8")
-    debugImplementation("androidx.compose.ui:ui-test-manifest:1.7.8")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 }
