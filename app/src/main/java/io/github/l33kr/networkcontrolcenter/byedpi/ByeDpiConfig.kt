@@ -22,13 +22,22 @@ enum class DomainFilterMode {
     EXCLUDE_LISTED,
 }
 
+/**
+ * Proven baseline from the 0.4 catalog. Keep the original command byte-for-byte:
+ * it relies on native ByeDPI Linux socket behaviour (fake + DISOOB/OOB + TLS record split).
+ */
+object ByeDpiStableProfile {
+    const val NAME = "Стратегия 16"
+    const val COMMAND = "-f1 -t5 -n {sni} -q3+h -Qr -f2 -q1 -r1+s -t15 -q1 -o2 -a1"
+}
+
 data class ByeDpiConfig(
     val bindIp: String = "127.0.0.1",
     val port: Int = 1080,
-    val mode: ByeDpiMode = ByeDpiMode.AUTO,
+    val mode: ByeDpiMode = ByeDpiMode.MANUAL,
     /** Used for manual and imported catalog strategies. */
-    val command: String = ByeDpiStrategies.BALANCED.command,
-    val strategyName: String? = null,
+    val command: String = ByeDpiStableProfile.COMMAND,
+    val strategyName: String? = ByeDpiStableProfile.NAME,
     val sni: String = "google.com",
     val dns: String = "1.1.1.1",
     val ipv6Mode: Ipv6Mode = Ipv6Mode.AUTO,
@@ -63,13 +72,7 @@ data class ByeDpiConfig(
 
         return when (domainFilterMode) {
             DomainFilterMode.ALL -> strategyArgs
-
-            // Every desync group receives the host whitelist. This keeps a multi-stage
-            // strategy inside the selected domains even when it contains -A/--auto fallbacks.
             DomainFilterMode.ONLY_LISTED -> injectHostsIntoEveryGroup(strategyArgs, hostsArg)
-
-            // First group is a no-op guard for excluded hosts. -An moves to the selected
-            // strategy only when that guard is skipped because the host is not excluded.
             DomainFilterMode.EXCLUDE_LISTED -> buildList {
                 add("-H")
                 add(hostsArg)
@@ -98,17 +101,9 @@ data class ByeDpiConfig(
                     add(hostsArg)
                 }
 
-                token.startsWith("-A") && token.length > 2 -> {
-                    add("-H")
-                    add(hostsArg)
-                }
-
-                token.startsWith("--auto=") -> {
-                    add("-H")
-                    add(hostsArg)
-                }
+                token.startsWith("-A") && token.length > 2 -> add("-H").also { add(hostsArg) }
+                token.startsWith("--auto=") -> add("-H").also { add(hostsArg) }
             }
-
             index++
         }
     }
@@ -116,6 +111,7 @@ data class ByeDpiConfig(
 
 object ByeDpiConfigStore {
     private const val PREFS = "byedpi"
+    private const val KEY_REBUILD_MIGRATED = "stable_rebuild_0_5_migrated"
 
     fun load(context: Context): ByeDpiConfig {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -124,12 +120,12 @@ object ByeDpiConfigStore {
             port = prefs.getInt("port", 1080).coerceIn(1, 65535),
             mode = runCatching {
                 ByeDpiMode.valueOf(
-                    prefs.getString("mode", ByeDpiMode.AUTO.name) ?: ByeDpiMode.AUTO.name,
+                    prefs.getString("mode", ByeDpiMode.MANUAL.name) ?: ByeDpiMode.MANUAL.name,
                 )
-            }.getOrDefault(ByeDpiMode.AUTO),
-            command = prefs.getString("command", ByeDpiStrategies.BALANCED.command)
-                ?: ByeDpiStrategies.BALANCED.command,
-            strategyName = prefs.getString("strategy_name", null),
+            }.getOrDefault(ByeDpiMode.MANUAL),
+            command = prefs.getString("command", ByeDpiStableProfile.COMMAND)
+                ?: ByeDpiStableProfile.COMMAND,
+            strategyName = prefs.getString("strategy_name", ByeDpiStableProfile.NAME),
             sni = prefs.getString("sni", "google.com")?.trim().orEmpty().ifBlank { "google.com" },
             dns = prefs.getString("dns", "1.1.1.1") ?: "1.1.1.1",
             ipv6Mode = runCatching {
@@ -145,6 +141,22 @@ object ByeDpiConfigStore {
             }.getOrDefault(DomainFilterMode.ALL),
             domains = prefs.getString("domains", "") ?: "",
         )
+    }
+
+    /** One-time migration for the rebuild branch: preserve DNS/domain settings but start from proven #16. */
+    fun ensureStableRebuildBaseline(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_REBUILD_MIGRATED, false)) return
+        val current = load(context)
+        save(
+            context,
+            current.copy(
+                mode = ByeDpiMode.MANUAL,
+                command = ByeDpiStableProfile.COMMAND,
+                strategyName = ByeDpiStableProfile.NAME,
+            ),
+        )
+        prefs.edit().putBoolean(KEY_REBUILD_MIGRATED, true).apply()
     }
 
     fun save(context: Context, config: ByeDpiConfig) {
@@ -186,7 +198,7 @@ object ByeDpiConfigStore {
             context,
             current.copy(
                 mode = ByeDpiMode.MANUAL,
-                command = command.trim().ifBlank { ByeDpiStrategies.BALANCED.command },
+                command = command.trim().ifBlank { ByeDpiStableProfile.COMMAND },
                 strategyName = name,
             ),
         )
