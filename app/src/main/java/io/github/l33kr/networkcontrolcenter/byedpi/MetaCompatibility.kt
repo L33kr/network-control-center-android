@@ -1,15 +1,11 @@
 package io.github.l33kr.networkcontrolcenter.byedpi
 
 /**
- * Extra compatibility groups for Meta traffic while preserving the proven #16
- * TLS/HTTP behaviour. This is intentionally applied only to the known working
- * strategy, so selecting another catalog entry still runs it unchanged.
+ * Targeted compatibility groups placed in front of the proven strategy #16.
  *
- * The IP ranges cover the commonly used Meta / WhatsApp / Instagram networks.
- * UDP traffic to these networks gets stronger fake-packet desync, while raw
- * non-HTTP/TLS TCP traffic gets a generic disorder + OOB fallback. A regular
- * UDP fallback is kept for non-Meta traffic so the original #16 behaviour is
- * not weakened for QUIC-heavy services.
+ * The key rule here is that #16 itself remains an unchanged catch-all fallback.
+ * Only traffic that can be identified as Meta by destination network and needs
+ * treatment outside ordinary HTTP/TLS is intercepted by the preceding groups.
  */
 object MetaCompatibility {
     private val metaNetworks = listOf(
@@ -42,29 +38,25 @@ object MetaCompatibility {
         if (command.trim() != ByeDpiStableProfile.COMMAND) return command
 
         return buildString {
-            // Group 1: keep strategy #16 byte-for-byte for TLS/HTTP, only adding
-            // an L7 selector so UDP/raw TCP can fall through to dedicated groups.
-            append("-Kt,h ")
-            append(ByeDpiStableProfile.COMMAND)
-
-            // Group 2: stronger UDP fake for Meta ranges. This also covers QUIC
-            // and the UDP flows used by calls/media without touching unrelated UDP.
-            append(" -An -Ku -j \"")
+            // Meta UDP: QUIC plus messenger call/media traffic. Multiple short-
+            // TTL fakes mirror the IPSet/UDP approach commonly used with zapret,
+            // without affecting UDP traffic to unrelated networks.
+            append("-Ku -j \"")
             append(":")
             append(inlineIpset)
             append("\" -a11 -t8")
 
-            // Group 3: retain the original lightweight UDP fake for everything else.
-            append(" -An -Ku -a1")
-
-            // Group 4: raw Meta TCP that is neither HTTP nor TLS (messenger traffic).
+            // WhatsApp also maintains non-HTTP/TLS TCP connections around 5222.
+            // Limit this fallback to Meta destinations and the messenger port
+            // range so normal HTTPS is still handled by the known-good #16.
             append(" -An -j \"")
             append(":")
             append(inlineIpset)
-            append("\" -d1 -o1")
+            append("\" -V 5222-5242 -d1 -o1")
 
-            // Final no-op group for traffic that matched none of the selectors.
-            append(" -An")
+            // Exact working 0.4 strategy, unchanged, for everything else.
+            append(" -An ")
+            append(ByeDpiStableProfile.COMMAND)
         }
     }
 }
