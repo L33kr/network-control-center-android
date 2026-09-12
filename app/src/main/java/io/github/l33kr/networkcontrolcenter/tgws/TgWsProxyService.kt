@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TgWsProxyService : Service() {
@@ -35,6 +36,8 @@ class TgWsProxyService : Service() {
         private const val TAG = "TgWsProxyService"
         private const val CHANNEL_ID = "tg_ws_proxy"
         private const val NOTIFICATION_ID = 1201
+        private const val STATE_PREFS = "tg_ws_service_state"
+        private const val KEY_WANTED = "wanted"
 
         private val _status = MutableStateFlow(EngineStatus.STOPPED)
         val status: StateFlow<EngineStatus> = _status.asStateFlow()
@@ -53,10 +56,20 @@ class TgWsProxyService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startProxy()
-            ACTION_STOP -> stopProxy()
+            ACTION_START -> {
+                setWanted(true)
+                startProxy()
+            }
+            ACTION_STOP -> {
+                setWanted(false)
+                stopProxy()
+            }
+            null -> {
+                // START_STICKY recreation after the process/service was reclaimed.
+                if (isWanted()) startProxy()
+            }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun startProxy() {
@@ -85,10 +98,7 @@ class TgWsProxyService : Service() {
                 TgWsNative.setCloudflare(config.cloudflareEnabled, config.cloudflareDomain)
 
                 if (!TgWsNative.trySetWorkerDomains(config.workerDomains)) {
-                    Log.w(
-                        TAG,
-                        "This bundled libtgwsproxy.so does not export SetCfWorkerDomains; continuing without Worker domains",
-                    )
+                    Log.w(TAG, "Bundled libtgwsproxy.so has no SetCfWorkerDomains export")
                 }
 
                 val result = TgWsNative.start(
@@ -99,15 +109,25 @@ class TgWsProxyService : Service() {
                     verbose = true,
                 )
 
-                if (result == 0 && !stopping.get()) {
+                if (result != 0) {
+                    if (!stopping.get()) fail(nativeErrorText(result))
+                    return@Thread
+                }
+
+                // StartProxy returning 0 is not enough: make sure the local listener
+                // is actually reachable before telling Telegram to use it.
+                if (!waitUntilListening(config.bindIp, selectedPort)) {
+                    runCatching { TgWsNative.stop() }
+                    if (!stopping.get()) fail("TG WS запустился, но локальный порт не отвечает")
+                    return@Thread
+                }
+
+                if (!stopping.get()) {
                     _activePort.value = selectedPort
                     _lastError.value = null
                     _status.value = EngineStatus.RUNNING
                     updateNotification("127.0.0.1:$selectedPort · работает")
                     Log.i(TAG, "TG WS proxy started on ${config.bindIp}:$selectedPort")
-                } else if (!stopping.get()) {
-                    fail(nativeErrorText(result))
-                    Log.e(TAG, "TG WS StartProxy returned $result")
                 }
             } catch (t: Throwable) {
                 if (!stopping.get()) {
@@ -130,7 +150,12 @@ class TgWsProxyService : Service() {
         _lastError.value = message
         _status.value = EngineStatus.FAILED
         updateNotification("Ошибка: $message")
-        releaseWakeLock()
+        // Keep the foreground service alive only when the user still wants the proxy.
+        if (!isWanted()) {
+            releaseWakeLock()
+            stopForegroundCompat()
+            stopSelf()
+        }
     }
 
     private fun nativeErrorText(code: Int): String = when (code) {
@@ -163,6 +188,24 @@ class TgWsProxyService : Service() {
         true
     }.getOrDefault(false)
 
+    private fun waitUntilListening(host: String, port: Int): Boolean {
+        repeat(30) {
+            val listening = runCatching {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(host, port), 150)
+                }
+                true
+            }.getOrDefault(false)
+            if (listening) return true
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return false
+    }
+
     private fun stopProxy() {
         if (_status.value == EngineStatus.STOPPED || !stopping.compareAndSet(false, true)) return
         _status.value = EngineStatus.STOPPING
@@ -184,6 +227,17 @@ class TgWsProxyService : Service() {
             start()
         }
     }
+
+    private fun setWanted(value: Boolean) {
+        getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_WANTED, value)
+            .apply()
+    }
+
+    private fun isWanted(): Boolean =
+        getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_WANTED, false)
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -260,7 +314,12 @@ class TgWsProxyService : Service() {
             wakeLock = manager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "DPIControl:TgWs",
-            ).apply { acquire(30L * 60L * 1000L) }
+            ).apply {
+                setReferenceCounted(false)
+                // Foreground proxy is explicitly stopped by the user/service lifecycle;
+                // a fixed 30-minute timeout caused long-lived sessions to go idle/drop.
+                acquire()
+            }
         }.onFailure { Log.w(TAG, "Could not acquire wake lock", it) }
     }
 
@@ -270,6 +329,10 @@ class TgWsProxyService : Service() {
     }
 
     override fun onDestroy() {
+        // Never leave the native singleton running after Android destroys the service.
+        runCatching { TgWsNative.stop() }
+        _activePort.value = 0
+        if (!isWanted()) _status.value = EngineStatus.STOPPED
         releaseWakeLock()
         super.onDestroy()
     }
