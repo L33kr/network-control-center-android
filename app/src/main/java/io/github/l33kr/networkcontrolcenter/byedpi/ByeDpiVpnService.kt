@@ -137,8 +137,17 @@ class ByeDpiVpnService : VpnService() {
                 if (config.dns.isNotBlank()) builder.addDnsServer(config.dns)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
-                // Native local proxies must stay outside the TUN to avoid VPN loops.
+                // DPI Control itself must stay outside TUN to avoid a recursive proxy loop.
                 builder.addDisallowedApplication(packageName)
+
+                // User-selected applications completely bypass this VpnService.
+                // Stale/uninstalled packages are ignored so they cannot prevent VPN startup.
+                val excluded = VpnAppFilterStore.excludedPackages(this@ByeDpiVpnService)
+                excluded.filter { it != packageName }.forEach { excludedPackage ->
+                    runCatching { builder.addDisallowedApplication(excludedPackage) }
+                        .onFailure { Log.w(TAG, "Cannot exclude $excludedPackage", it) }
+                }
+                Log.i(TAG, "VPN app exclusions: ${excluded.size}")
 
                 val descriptor = builder.establish()
                     ?: error("Android не создал VPN-интерфейс")
