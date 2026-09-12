@@ -23,7 +23,7 @@ enum class DomainFilterMode {
 }
 
 /**
- * Proven baseline from the 0.4 catalog. Keep the original command byte-for-byte:
+ * Proven baseline from the 0.4 catalog. Keep the stored command byte-for-byte:
  * it relies on native ByeDPI Linux socket behaviour (fake + DISOOB/OOB + TLS record split).
  */
 object ByeDpiStableProfile {
@@ -60,8 +60,18 @@ data class ByeDpiConfig(
         add("--port")
         add(port.toString())
 
-        val strategyArgs = shellSplit((commandOverride ?: command).replace("{sni}", sni))
-        addAll(applyDomainFilter(strategyArgs))
+        val originalCommand = commandOverride ?: command
+        val effectiveCommand = MetaCompatibility.enhance(originalCommand)
+        val strategyArgs = shellSplit(effectiveCommand.replace("{sni}", sni))
+
+        // The rebuilt UI no longer exposes the old domain-filter screen. More
+        // importantly, hidden settings left by an older install must not inject
+        // -H into the Meta/IPSet fallback groups around the proven strategy #16.
+        if (originalCommand.trim() == ByeDpiStableProfile.COMMAND) {
+            addAll(strategyArgs)
+        } else {
+            addAll(applyDomainFilter(strategyArgs))
+        }
     }.toTypedArray()
 
     private fun applyDomainFilter(strategyArgs: List<String>): List<String> {
