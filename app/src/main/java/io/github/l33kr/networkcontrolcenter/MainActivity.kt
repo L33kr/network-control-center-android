@@ -73,6 +73,8 @@ import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiController
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStableProfile
 import io.github.l33kr.networkcontrolcenter.byedpi.ByeDpiStrategyCatalog
 import io.github.l33kr.networkcontrolcenter.byedpi.CatalogStrategy
+import io.github.l33kr.networkcontrolcenter.byedpi.DnsProvider
+import io.github.l33kr.networkcontrolcenter.byedpi.DpiDnsPolicy
 import io.github.l33kr.networkcontrolcenter.byedpi.VpnAppEntry
 import io.github.l33kr.networkcontrolcenter.byedpi.VpnAppFilterStore
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
@@ -221,6 +223,10 @@ private fun DpiControlApp(
                     ByeDpiConfigStore.setSni(context, sni)
                     refreshConfig()
                 },
+                onDnsSave = { dns ->
+                    ByeDpiConfigStore.setDns(context, dns)
+                    refreshConfig()
+                },
             )
 
             AppTab.APPS -> AppFilterScreen(
@@ -259,10 +265,13 @@ private fun HomeScreen(
     onSelectStrategy: (CatalogStrategy) -> Unit,
     onUseStable16: () -> Unit,
     onSniSave: (String) -> Unit,
+    onDnsSave: (String) -> Unit,
 ) {
     val running = state.byeDpi == EngineStatus.RUNNING || state.byeDpi == EngineStatus.STARTING
     var showStrategies by rememberSaveable { mutableStateOf(false) }
+    var showDns by rememberSaveable { mutableStateOf(false) }
     var sni by rememberSaveable(config.sni) { mutableStateOf(config.sni) }
+    val dnsProvider = remember(config.dns) { DpiDnsPolicy.providerFor(config.dns) }
 
     if (showStrategies) {
         StrategyDialog(
@@ -272,6 +281,21 @@ private fun HomeScreen(
             onSelect = {
                 onSelectStrategy(it)
                 showStrategies = false
+            },
+        )
+    }
+
+    if (showDns) {
+        DnsDialog(
+            currentDns = config.dns,
+            onDismiss = { showDns = false },
+            onProvider = { provider ->
+                onDnsSave(provider.primary)
+                showDns = false
+            },
+            onCustom = { custom ->
+                onDnsSave(custom)
+                showDns = false
             },
         )
     }
@@ -396,6 +420,37 @@ private fun HomeScreen(
             }
         }
 
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("DNS", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    dnsProvider?.name ?: "Свой DNS",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    if (dnsProvider != null) {
+                        dnsProvider.ipv4.joinToString(" · ")
+                    } else {
+                        config.dns
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                dnsProvider?.warning?.let { warning ->
+                    Text(warning, color = MaterialTheme.colorScheme.tertiary)
+                }
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = editable,
+                    onClick = { showDns = true },
+                ) {
+                    Icon(Icons.Rounded.Tune, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Выбрать DNS")
+                }
+            }
+        }
+
         Text(
             "Приложения, которые должны идти напрямую без VPN, выбираются во вкладке «Приложения». Изменять список нужно при выключенном VPN.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -460,6 +515,84 @@ private fun StrategyDialog(
                             }
                         }
                     }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } },
+    )
+}
+
+@Composable
+private fun DnsDialog(
+    currentDns: String,
+    onDismiss: () -> Unit,
+    onProvider: (DnsProvider) -> Unit,
+    onCustom: (String) -> Unit,
+) {
+    var customDns by rememberSaveable(currentDns) { mutableStateOf(currentDns) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("DNS сервер") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Провайдеры из набора ZapretGUI. При выборе используется основная и резервная пара выбранного сервиса.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 390.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    items(DpiDnsPolicy.providers, key = { it.name }) { provider ->
+                        val selected = currentDns in provider.ipv4 || currentDns in provider.ipv6
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else MaterialTheme.colorScheme.surfaceVariant
+                            ),
+                            onClick = { onProvider(provider) },
+                        ) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(provider.name, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                    Text(provider.category, style = MaterialTheme.typography.labelSmall)
+                                }
+                                Text(provider.description, style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    provider.ipv4.joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                provider.warning?.let { warning ->
+                                    Text(
+                                        warning,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = customDns,
+                    onValueChange = { customDns = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Свой DNS (IPv4/IPv6)") },
+                )
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = customDns.trim().isNotBlank(),
+                    onClick = { onCustom(customDns.trim()) },
+                ) {
+                    Text("Применить свой DNS")
                 }
             }
         },
