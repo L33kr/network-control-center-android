@@ -35,6 +35,30 @@ class DnsPacketTest {
         assertThrows(IOException::class.java) { DnsPacket.addresses(response(), "other.com", 1234) }
     }
 
+    @Test fun followsCnameButIgnoresUnrelatedAddresses() {
+        fun encodedName(host: String): ByteArray = DnsPacket.query(host, 1234).let { it.copyOfRange(12, it.size - 4) }
+        val edge = encodedName("edge.example.com")
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { out ->
+            out.write(query.copyOf().apply { ByteBuffer.wrap(this).putShort(2, 0x8180.toShort()).putShort(6, 3) })
+            out.writeShort(0xc00c)
+            out.writeShort(5)
+            out.writeShort(1)
+            out.writeInt(60)
+            out.writeShort(edge.size)
+            out.write(edge)
+            for ((name, lastByte) in listOf("unrelated.example.org" to 99, "edge.example.com" to 12)) {
+                out.write(encodedName(name))
+                out.writeShort(1)
+                out.writeShort(1)
+                out.writeInt(60)
+                out.writeShort(4)
+                out.write(byteArrayOf(192.toByte(), 0, 2, lastByte.toByte()))
+            }
+        }
+        assertEquals(listOf("192.0.2.12"), DnsPacket.addresses(bytes.toByteArray(), "example.com", 1234).map { it.hostAddress })
+    }
+
     @Test fun rejectsCyclicCompressionAndTruncatedRecords() {
         val cyclic = response().apply { this[12] = 0xc0.toByte(); this[13] = 12 }
         assertThrows(IOException::class.java) { DnsPacket.addresses(cyclic, "example.com", 1234) }

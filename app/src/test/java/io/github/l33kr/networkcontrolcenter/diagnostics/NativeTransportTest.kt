@@ -23,12 +23,13 @@ class NativeTransportTest {
         val executable = System.getenv("BYEDPI_TEST_BINARY")
         assumeTrue("Set BYEDPI_TEST_BINARY to the compiled pinned core", executable != null && File(executable).canExecute())
         val port = ServerSocket(0, 1, loopback).use { it.localPort }
+        val log = File.createTempFile("byedpi-test-", ".log")
         val process = ProcessBuilder(listOf(executable!!) + config.copy(port = port).toArgs().drop(1))
-            .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+            .redirectErrorStream(true).redirectOutput(log).start()
         try {
             var ready = false
             for (attempt in 0..100) {
-                if (!process.isAlive) fail("ByeDPI rejected generated args, exit=${process.exitValue()}")
+                if (!process.isAlive) fail("ByeDPI rejected generated args, exit=${process.exitValue()}: ${log.readText().takeLast(2000)}")
                 ready = runCatching {
                     Socket().use { socket ->
                         socket.soTimeout = 500
@@ -41,11 +42,12 @@ class NativeTransportTest {
                 if (ready) break
                 Thread.sleep(20)
             }
-            assertTrue("SOCKS5 did not become ready", ready)
+            assertTrue("SOCKS5 did not become ready: ${log.readText().takeLast(2000)}", ready)
             block(port)
         } finally {
             process.destroy()
             if (!process.waitFor(2, TimeUnit.SECONDS)) process.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
+            log.delete()
         }
     }
 
