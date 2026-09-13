@@ -219,6 +219,11 @@ object ByeDpiConfigStore {
         save(context, current.copy(sni = sni.trim().ifBlank { "google.com" }))
     }
 
+    fun setDns(context: Context, dns: String) {
+        val current = load(context)
+        save(context, current.copy(dns = dns.trim().ifBlank { DpiDnsPolicy.DEFAULT_PRIMARY }))
+    }
+
     fun setDomainFilter(context: Context, mode: DomainFilterMode, domains: String) {
         val current = load(context)
         save(context, current.copy(domainFilterMode = mode, domains = domains))
