@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.l33kr.networkcontrolcenter"
         minSdk = 24
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.5.3-beta"
+        versionCode = 9
+        versionName = "0.5.4-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -100,6 +100,7 @@ tasks.named("preBuild").configure {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")

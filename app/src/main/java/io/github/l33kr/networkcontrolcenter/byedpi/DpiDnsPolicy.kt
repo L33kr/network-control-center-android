@@ -15,6 +15,8 @@ data class DnsProvider(
 
 object DpiDnsPolicy {
     const val DEFAULT_PRIMARY = "9.9.9.9"
+    // Source: ZapretGUI src/dns/dns_providers.py, b5543b6e69c8566166e4e5fd8c2b4d7be92e7d76.
+    const val CATALOG_REVISION = "ZapretGUI · 2026-08-27 · b5543b6"
 
     val providers: List<DnsProvider> = listOf(
         DnsProvider(
@@ -67,6 +69,20 @@ object DpiDnsPolicy {
         ),
         DnsProvider(
             name = "Xbox DNS",
+            category = "Для ИИ",
+            ipv4 = listOf("111.88.96.50", "111.88.96.51"),
+            description = "DNS для доступа к отдельным сервисам",
+            warning = "Доступность зависит от оператора",
+        ),
+        DnsProvider(
+            name = "Xbox DNS v2",
+            category = "Для ИИ",
+            ipv4 = listOf("87.228.47.200", "87.228.47.201"),
+            description = "Альтернативная пара Xbox DNS",
+            warning = "Доступность зависит от оператора",
+        ),
+        DnsProvider(
+            name = "Xbox DNS (old)",
             category = "Для ИИ",
             ipv4 = listOf("176.99.11.77", "80.78.247.254"),
             description = "DNS для доступа к отдельным сервисам",

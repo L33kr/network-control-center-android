@@ -41,6 +41,8 @@ data class ByeDpiConfig(
     val sni: String = "google.com",
     val dns: String = DpiDnsPolicy.DEFAULT_PRIMARY,
     val ipv6Mode: Ipv6Mode = Ipv6Mode.AUTO,
+    /** Optional 0.5.3 Meta groups; false gives the exact, unwrapped strategy. */
+    val metaCompatibility: Boolean = false,
     val domainFilterMode: DomainFilterMode = DomainFilterMode.ALL,
     val domains: String = "",
 ) {
@@ -61,8 +63,9 @@ data class ByeDpiConfig(
         add(port.toString())
 
         val originalCommand = commandOverride ?: command
-        val effectiveCommand = MetaCompatibility.enhance(originalCommand)
-        val strategyArgs = shellSplit(effectiveCommand.replace("{sni}", sni))
+        val effectiveCommand = if (metaCompatibility) MetaCompatibility.enhance(originalCommand) else originalCommand
+        // Substitute after tokenization: a fake SNI must never introduce CLI options.
+        val strategyArgs = shellSplit(effectiveCommand).map { it.replace("{sni}", sni) }
 
         // The rebuilt UI no longer exposes the old domain-filter screen. More
         // importantly, hidden settings left by an older install must not inject
@@ -143,6 +146,9 @@ object ByeDpiConfigStore {
                     prefs.getString("ipv6_mode", Ipv6Mode.AUTO.name) ?: Ipv6Mode.AUTO.name,
                 )
             }.getOrDefault(Ipv6Mode.AUTO),
+            // Existing installations keep their 0.5.3 behavior. Fresh installs
+            // start with pure #16. Subsequent choices are persisted explicitly.
+            metaCompatibility = prefs.getBoolean("meta_compatibility", prefs.getBoolean(KEY_REBUILD_MIGRATED, false)),
             domainFilterMode = runCatching {
                 DomainFilterMode.valueOf(
                     prefs.getString("domain_filter_mode", DomainFilterMode.ALL.name)
@@ -180,6 +186,7 @@ object ByeDpiConfigStore {
             .putString("sni", config.sni)
             .putString("dns", config.dns)
             .putString("ipv6_mode", config.ipv6Mode.name)
+            .putBoolean("meta_compatibility", config.metaCompatibility)
             .putString("domain_filter_mode", config.domainFilterMode.name)
             .putString("domains", config.domains)
             .apply()
@@ -217,6 +224,19 @@ object ByeDpiConfigStore {
     fun setSni(context: Context, sni: String) {
         val current = load(context)
         save(context, current.copy(sni = sni.trim().ifBlank { "google.com" }))
+    }
+
+    fun setMetaCompatibility(context: Context, enabled: Boolean) {
+        save(context, load(context).copy(metaCompatibility = enabled))
+    }
+
+    fun useStableBaseline(context: Context) {
+        save(context, load(context).copy(
+            mode = ByeDpiMode.MANUAL,
+            command = ByeDpiStableProfile.COMMAND,
+            strategyName = ByeDpiStableProfile.NAME,
+            metaCompatibility = false,
+        ))
     }
 
     fun setDns(context: Context, dns: String) {

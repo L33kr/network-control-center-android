@@ -67,6 +67,9 @@ class ByeDpiVpnService : VpnService() {
 
         private val _lastError = MutableStateFlow<String?>(null)
         val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
+        private val _activeConfig = MutableStateFlow<ByeDpiConfig?>(null)
+        val activeConfig: StateFlow<ByeDpiConfig?> = _activeConfig.asStateFlow()
     }
 
     override fun onCreate() {
@@ -86,6 +89,7 @@ class ByeDpiVpnService : VpnService() {
         if (_status.value == EngineStatus.STARTING || _status.value == EngineStatus.RUNNING) return
 
         stopping.set(false)
+        _activeConfig.value = null
         _lastError.value = null
         _status.value = EngineStatus.STARTING
         startForegroundCompat(createNotification("Запуск ByeDPI…"))
@@ -166,6 +170,7 @@ class ByeDpiVpnService : VpnService() {
                     error("hev-socks5-tunnel не запустился")
                 }
 
+                _activeConfig.value = config.copy(command = strategy.command, strategyName = strategy.title)
                 _status.value = EngineStatus.RUNNING
                 val ipv6Text = if (useIpv6) "IPv4+IPv6" else "IPv4"
                 updateNotification("${strategy.title} · ${network.label} · $ipv6Text")
@@ -269,6 +274,7 @@ class ByeDpiVpnService : VpnService() {
     private suspend fun stopEngine() {
         if (_status.value == EngineStatus.STOPPED || !stopping.compareAndSet(false, true)) return
         _status.value = EngineStatus.STOPPING
+        _activeConfig.value = null
         updateNotification("Остановка ByeDPI…")
 
         stopHevAndTun()
@@ -286,6 +292,7 @@ class ByeDpiVpnService : VpnService() {
     }
 
     private suspend fun cleanupAfterFailure() {
+        _activeConfig.value = null
         stopHevAndTun()
         stopProxyOnly()
         clearRuntimeFiles()
@@ -393,6 +400,7 @@ class ByeDpiVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        _activeConfig.value = null
         scope.cancel()
         super.onDestroy()
     }

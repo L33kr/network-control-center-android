@@ -10,6 +10,7 @@ object ByeDpiController {
     val networkLabel = ByeDpiVpnService.networkLabel
     val ipv6Active = ByeDpiVpnService.ipv6Active
     val lastError = ByeDpiVpnService.lastError
+    val activeConfig = ByeDpiVpnService.activeConfig
 
     fun start(context: Context) {
         ContextCompat.startForegroundService(

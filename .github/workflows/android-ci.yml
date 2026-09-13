@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, feature/0.5-stable-rebuild ]
+    branches: [ main, feature/0.5-stable-rebuild, feature/0.5.4-zapret-tools ]
   pull_request:
   workflow_dispatch:
 
@@ -62,12 +62,17 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Test configuration and build debug APK
+        env:
+          BYEDPI_TEST_BINARY: ${{ github.workspace }}/third_party/byedpi/ciadpi
+        # Native smoke tests exercise the same pinned core through real local sockets.
+        run: |
+          make -C third_party/byedpi -j2
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: network-control-center-debug
+          name: DPI-Control-0.5.4-beta
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

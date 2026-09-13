@@ -48,6 +48,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -80,6 +81,8 @@ import io.github.l33kr.networkcontrolcenter.byedpi.VpnAppFilterStore
 import io.github.l33kr.networkcontrolcenter.core.AndroidUnifiedEngineController
 import io.github.l33kr.networkcontrolcenter.core.EngineState
 import io.github.l33kr.networkcontrolcenter.core.EngineStatus
+import io.github.l33kr.networkcontrolcenter.diagnostics.ConnectionDiagnostics
+import io.github.l33kr.networkcontrolcenter.diagnostics.DiagnosticsDialog
 import io.github.l33kr.networkcontrolcenter.tgws.TgWsController
 import io.github.l33kr.networkcontrolcenter.ui.theme.DpiControlTheme
 import kotlinx.coroutines.launch
@@ -149,6 +152,7 @@ private fun DpiControlApp(
     val byeNetwork by ByeDpiController.networkLabel.collectAsStateWithLifecycle()
     val byeIpv6 by ByeDpiController.ipv6Active.collectAsStateWithLifecycle()
     val byeError by ByeDpiController.lastError.collectAsStateWithLifecycle()
+    val activeConfig by ByeDpiController.activeConfig.collectAsStateWithLifecycle()
     val tgPort by TgWsController.activePort.collectAsStateWithLifecycle()
     val tgError by TgWsController.lastError.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -200,6 +204,7 @@ private fun DpiControlApp(
                 modifier = Modifier.padding(padding),
                 state = state,
                 config = config,
+                activeConfig = activeConfig,
                 activeProfile = byeProfile,
                 network = byeNetwork,
                 ipv6 = byeIpv6,
@@ -212,11 +217,11 @@ private fun DpiControlApp(
                     refreshConfig()
                 },
                 onUseStable16 = {
-                    ByeDpiConfigStore.setCatalogStrategy(
-                        context,
-                        ByeDpiStableProfile.NAME,
-                        ByeDpiStableProfile.COMMAND,
-                    )
+                    ByeDpiConfigStore.useStableBaseline(context)
+                    refreshConfig()
+                },
+                onMetaChange = { enabled ->
+                    ByeDpiConfigStore.setMetaCompatibility(context, enabled)
                     refreshConfig()
                 },
                 onSniSave = { sni ->
@@ -255,6 +260,7 @@ private fun HomeScreen(
     modifier: Modifier,
     state: EngineState,
     config: ByeDpiConfig,
+    activeConfig: ByeDpiConfig?,
     activeProfile: String?,
     network: String?,
     ipv6: Boolean,
@@ -264,14 +270,24 @@ private fun HomeScreen(
     onToggle: (Boolean) -> Unit,
     onSelectStrategy: (CatalogStrategy) -> Unit,
     onUseStable16: () -> Unit,
+    onMetaChange: (Boolean) -> Unit,
     onSniSave: (String) -> Unit,
     onDnsSave: (String) -> Unit,
 ) {
     val running = state.byeDpi == EngineStatus.RUNNING || state.byeDpi == EngineStatus.STARTING
     var showStrategies by rememberSaveable { mutableStateOf(false) }
     var showDns by rememberSaveable { mutableStateOf(false) }
+    var showCheck by rememberSaveable { mutableStateOf(false) }
     var sni by rememberSaveable(config.sni) { mutableStateOf(config.sni) }
     val dnsProvider = remember(config.dns) { DpiDnsPolicy.providerFor(config.dns) }
+
+    if (showCheck) {
+        DiagnosticsDialog(
+            activeConfig = activeConfig.takeIf { state.byeDpi == EngineStatus.RUNNING },
+            network = network,
+            onDismiss = { showCheck = false },
+        )
+    }
 
     if (showStrategies) {
         StrategyDialog(
@@ -367,6 +383,10 @@ private fun HomeScreen(
                     Spacer(Modifier.width(8.dp))
                     Text(if (running) "Отключить" else "Запустить")
                 }
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { showCheck = true },
+                ) { Text("Проверить соединение") }
             }
         }
 
@@ -388,13 +408,30 @@ private fun HomeScreen(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(enabled = editable, onClick = onUseStable16) {
-                        Text("№16")
+                        Text("Чистая №16")
                     }
                     OutlinedButton(enabled = editable, onClick = { showStrategies = true }) {
                         Icon(Icons.Rounded.Tune, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
                         Text("Другая")
                     }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Instagram / WhatsApp", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (config.command.trim() == ByeDpiStableProfile.COMMAND) {
+                                if (config.metaCompatibility) "Дополнительные Meta-группы из 0.5.3" else "Дополнение выключено"
+                            } else "Дополнение доступно для стратегии №16",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = config.metaCompatibility && config.command.trim() == ByeDpiStableProfile.COMMAND,
+                        onCheckedChange = onMetaChange,
+                        enabled = editable && config.command.trim() == ByeDpiStableProfile.COMMAND,
+                    )
                 }
             }
         }
@@ -408,11 +445,15 @@ private fun HomeScreen(
                     enabled = editable,
                     singleLine = true,
                     label = { Text("SNI для fake-пакета") },
+                    isError = !ConnectionDiagnostics.validSni(sni),
+                    supportingText = if (!ConnectionDiagnostics.validSni(sni)) {
+                        { Text("Укажи имя хоста без пробелов, например google.com") }
+                    } else null,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = editable && sni.trim().isNotBlank() && sni.trim() != config.sni,
+                    enabled = editable && ConnectionDiagnostics.validSni(sni) && sni.trim() != config.sni,
                     onClick = { onSniSave(sni.trim()) },
                 ) {
                     Text("Сохранить SNI")
@@ -538,7 +579,7 @@ private fun DnsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Провайдеры из набора ZapretGUI. При выборе используется основная и резервная пара выбранного сервиса.",
+                    "Обычный DNS, не DoH. Используются адреса выбранного провайдера. ${DpiDnsPolicy.CATALOG_REVISION}.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 LazyColumn(
@@ -586,10 +627,14 @@ private fun DnsDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Свой DNS (IPv4/IPv6)") },
+                    isError = !ConnectionDiagnostics.validDns(customDns),
+                    supportingText = if (!ConnectionDiagnostics.validDns(customDns)) {
+                        { Text("Укажи IP-адрес, например 9.9.9.9") }
+                    } else null,
                 )
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = customDns.trim().isNotBlank(),
+                    enabled = ConnectionDiagnostics.validDns(customDns),
                     onClick = { onCustom(customDns.trim()) },
                 ) {
                     Text("Применить свой DNS")
