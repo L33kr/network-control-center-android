@@ -39,7 +39,7 @@ data class ByeDpiConfig(
     val command: String = ByeDpiStableProfile.COMMAND,
     val strategyName: String? = ByeDpiStableProfile.NAME,
     val sni: String = "google.com",
-    val dns: String = "1.1.1.1",
+    val dns: String = DpiDnsPolicy.DEFAULT_PRIMARY,
     val ipv6Mode: Ipv6Mode = Ipv6Mode.AUTO,
     val domainFilterMode: DomainFilterMode = DomainFilterMode.ALL,
     val domains: String = "",
@@ -137,7 +137,7 @@ object ByeDpiConfigStore {
                 ?: ByeDpiStableProfile.COMMAND,
             strategyName = prefs.getString("strategy_name", ByeDpiStableProfile.NAME),
             sni = prefs.getString("sni", "google.com")?.trim().orEmpty().ifBlank { "google.com" },
-            dns = prefs.getString("dns", "1.1.1.1") ?: "1.1.1.1",
+            dns = prefs.getString("dns", DpiDnsPolicy.DEFAULT_PRIMARY) ?: DpiDnsPolicy.DEFAULT_PRIMARY,
             ipv6Mode = runCatching {
                 Ipv6Mode.valueOf(
                     prefs.getString("ipv6_mode", Ipv6Mode.AUTO.name) ?: Ipv6Mode.AUTO.name,
