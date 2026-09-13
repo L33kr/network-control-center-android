@@ -134,7 +134,16 @@ class ByeDpiVpnService : VpnService() {
                         .addRoute("::", 0)
                 }
 
-                if (config.dns.isNotBlank()) builder.addDnsServer(config.dns)
+                var dnsAdded = false
+                DpiDnsPolicy.servers(config.dns).forEach { server ->
+                    runCatching {
+                        builder.addDnsServer(server)
+                        dnsAdded = true
+                    }.onFailure { Log.w(TAG, "Cannot add VPN DNS $server", it) }
+                }
+                if (!dnsAdded) {
+                    builder.addDnsServer(DpiDnsPolicy.DEFAULT_PRIMARY)
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
                 // DPI Control itself must stay outside TUN to avoid a recursive proxy loop.
